@@ -122,14 +122,14 @@ function App() {
       const visible_wall_edges: Coords[] = []
 
       const intersect1 = intersect(camera.coords[0], camera.coords[1], x1_add, y1_add, wall[0][0], wall[0][1], wall[1][0], wall[1][1])
-      if (intersect1 != undefined) {
+      if (intersect1 !== undefined) {
         ctx.beginPath();
         ctx.arc(intersect1[0], intersect1[1], 5, 0, 2 * Math.PI);
         ctx.stroke();
         visible_wall_edges.push(intersect1);
       }
       const intersect2 = intersect(camera.coords[0], camera.coords[1], x2_add, y2_add, wall[0][0], wall[0][1], wall[1][0], wall[1][1])
-      if (intersect2 != undefined) {
+      if (intersect2 !== undefined) {
         ctx.beginPath();
         ctx.arc(intersect2[0], intersect2[1], 5, 0, 2 * Math.PI);
         ctx.stroke();
@@ -185,33 +185,33 @@ function App() {
     redraw();
     document.onkeydown = (e: KeyboardEvent): void => {
 
-      if (e.keyCode == 38) {
+      if (e.keyCode === 38) {
         // up arrow
         const new_x = camera.coords[0] + Math.cos(dtr(camera.direction)) * movement_size
         const new_y = camera.coords[1] + Math.sin(dtr(camera.direction)) * movement_size
         camera.coords = [new_x, new_y]
         redraw();
       }
-      else if (e.keyCode == 40) {
+      else if (e.keyCode === 40) {
         // down arrow
         const new_x = camera.coords[0] - Math.cos(dtr(camera.direction)) * movement_size
         const new_y = camera.coords[1] - Math.sin(dtr(camera.direction)) * movement_size
         camera.coords = [new_x, new_y]
         redraw();
       }
-      else if (e.keyCode == 37) {
+      else if (e.keyCode === 37) {
         // left arrow
         camera.direction = camera.direction - 5;
         redraw();
       }
-      else if (e.keyCode == 39) {
+      else if (e.keyCode === 39) {
         // right arrow
         camera.direction = camera.direction + 5;
         redraw();
       }
 
     }
-  }, []);
+  });
 
   return (
     <div className="App">
