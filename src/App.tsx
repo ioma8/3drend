@@ -26,8 +26,8 @@ const intersect = (x1: number, y1: number, x2: number, y2: number, x3: number, y
     return
   }
 
-  let ua = ((x4 - x3) * (y1 - y3) - (y4 - y3) * (x1 - x3)) / denominator
-  let ub = ((x2 - x1) * (y1 - y3) - (y2 - y1) * (x1 - x3)) / denominator
+  const ua = ((x4 - x3) * (y1 - y3) - (y4 - y3) * (x1 - x3)) / denominator
+  const ub = ((x2 - x1) * (y1 - y3) - (y2 - y1) * (x1 - x3)) / denominator
 
   // is the intersection along the segments
   if (ua < 0 || ua > 1 || ub < 0 || ub > 1) {
@@ -35,8 +35,8 @@ const intersect = (x1: number, y1: number, x2: number, y2: number, x3: number, y
   }
 
   // Return a object with the x and y coordinates of the intersection
-  let x = x1 + ua * (x2 - x1)
-  let y = y1 + ua * (y2 - y1)
+  const x = x1 + ua * (x2 - x1)
+  const y = y1 + ua * (y2 - y1)
 
   return [x, y]
 }
@@ -59,7 +59,7 @@ const walls: Wall[] = [
   [[10, 10], [300, 150]]
 ];
 
-type Camera = {
+interface Camera {
   coords: Coords;
   direction: number;
   angle: number;
@@ -79,13 +79,19 @@ function App() {
     const canvas = document.getElementById("canvas2D") as HTMLCanvasElement;
     canvas.width = 400;
     canvas.height = 400;
-    const ctx = canvas.getContext("2d")!;
+    const ctx = canvas.getContext("2d");
+    if (ctx === null) {
+      return;
+    }
     ctx.clearRect(0, 0, canvas.width, canvas.height);
 
     const canvas3D = document.getElementById("canvas3D") as HTMLCanvasElement;
     canvas3D.width = 400;
     canvas3D.height = 400;
-    const ctx3D = canvas3D.getContext("2d")!;
+    const ctx3D = canvas3D.getContext("2d");
+    if (ctx3D === null) {
+      return;
+    }
     ctx3D.clearRect(0, 0, canvas3D.width, canvas3D.height);
 
     for (const wall of walls) {

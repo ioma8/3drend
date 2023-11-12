@@ -10,6 +10,10 @@
     "@types/node": "^16.18.61",
     "@types/react": "^18.2.37",
     "@types/react-dom": "^18.2.15",
+    "@typescript-eslint/eslint-plugin": "^6.10.0",
+    "@typescript-eslint/parser": "^6.10.0",
+    "eslint": "^8.53.0",
+    "prettier": "^3.0.3",
     "react": "^18.2.0",
     "react-dom": "^18.2.0",
     "react-scripts": "5.0.1",
@@ -21,7 +25,8 @@
     "build": "react-scripts build",
     "test": "react-scripts test",
     "eject": "react-scripts eject",
-    "fix-js": "eslint-auto-fix"
+    "lint": "eslint ./src",
+    "lint:fix": "eslint --fix ./src"
   },
   "eslintConfig": {
     "extends": [
@@ -42,6 +47,6 @@
     ]
   },
   "devDependencies": {
-    "eslint-auto-fix": "^1.0.4"
+    "eslint-config-prettier": "^9.0.0"
   }
 }
