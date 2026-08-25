@@ -44,22 +44,30 @@ const intersect = (x1: number, y1: number, x2: number, y2: number, x3: number, y
 
 
 type Coords = [number, number]; // x, y
-type Wall = [Coords, Coords] // start, end
+type Wall = [Coords, Coords, string] // start, end, texture url
 
-
-const distance = (p1: Coords, p2: Coords): number => {
-  const a = p1[0] - p2[0];
-  const b = p1[1] - p2[1];
-
-  const c = Math.sqrt(a * a + b * b);
-  return c;
-}
 
 const in_frustum = (angle: number, from: number, to: number): boolean => {
   if (from <= to) {
     return angle >= from && angle <= to;
   }
   return angle >= from || angle <= to;
+}
+
+const distance = (p1: Coords, p2: Coords): number => {
+  const a = p1[0] - p2[0];
+  const b = p1[1] - p2[1];
+  return Math.sqrt(a * a + b * b);
+}
+
+const wall_param = (p: Coords, a: Coords, b: Coords): number => {
+  const dx = b[0] - a[0];
+  const dy = b[1] - a[1];
+  const len2 = dx * dx + dy * dy;
+  if (len2 === 0) {
+    return 0;
+  }
+  return ((p[0] - a[0]) * dx + (p[1] - a[1]) * dy) / len2;
 }
 
 const angle_to_x = (angle: number, from: number, to: number, width: number): number => {
@@ -80,9 +88,16 @@ const dist_to_segment = (p: Coords, a: Coords, b: Coords): number => {
 }
 
 const walls: Wall[] = [
-  [[10, 10], [300, 150]],
-  [[300, 150], [300, 200]]
+  [[10, 10], [300, 150], "/textures/wall1.png"],
+  [[300, 150], [300, 200], "/textures/wall2.png"]
 ];
+
+const wall_textures: Record<string, HTMLImageElement> = {};
+for (const wall of walls) {
+  const img = new Image();
+  img.src = wall[2];
+  wall_textures[wall[2]] = img;
+}
 
 interface Camera {
   coords: Coords;
@@ -153,56 +168,88 @@ function App() {
     const walls_by_depth = [...walls].sort(
       (a, b) => dist_to_segment(camera.coords, b[0], b[1]) - dist_to_segment(camera.coords, a[0], a[1])
     );
-
     for (const wall of walls_by_depth) {
-      // 3D view: screen anchors for the wall's visible part.
-      // Anchors = wall endpoints inside the frustum (projected by angle -> x)
-      // plus wall/frustum-boundary intersections (at x = 0 / x = width).
-      // The wall is drawn as a quad spanning its extreme anchors.
-      const anchors: { x: number; hh: number }[] = [];
 
-      for (const edge_coord of wall) {
-        const edge_angle = fix_degrees((Math.atan2(edge_coord[1] - camera.coords[1], edge_coord[0] - camera.coords[0]) * 180) / Math.PI);
-        if (in_frustum(edge_angle, cam_from, cam_to)) {
-          anchors.push({
-            x: angle_to_x(edge_angle, cam_from, cam_to, canvas3D.width),
-            hh: half_height(distance(camera.coords, edge_coord), canvas3D.height, line_length),
-          });
-        }
-      }
-
+      // 2D top-down view: mark where the frustum boundary rays meet the wall.
       const hit_from = intersect(camera.coords[0], camera.coords[1], x1_add, y1_add, wall[0][0], wall[0][1], wall[1][0], wall[1][1]);
       if (hit_from !== undefined) {
         ctx.beginPath();
         ctx.arc(hit_from[0], hit_from[1], 5, 0, 2 * Math.PI);
         ctx.stroke();
-        anchors.push({ x: 0, hh: half_height(distance(camera.coords, hit_from), canvas3D.height, line_length) });
       }
       const hit_to = intersect(camera.coords[0], camera.coords[1], x2_add, y2_add, wall[0][0], wall[0][1], wall[1][0], wall[1][1]);
       if (hit_to !== undefined) {
         ctx.beginPath();
         ctx.arc(hit_to[0], hit_to[1], 5, 0, 2 * Math.PI);
         ctx.stroke();
-        anchors.push({ x: canvas3D.width, hh: half_height(distance(camera.coords, hit_to), canvas3D.height, line_length) });
+      }
+
+      // 3D view: fill the wall's screen quad with its texture, matching the
+      // wireframe geometry exactly. Anchors = in-frustum wall endpoints plus
+      // frustum-boundary hits; the height interpolates linearly between the
+      // two extreme anchors, so the textured fill has the same straight edges
+      // as the wireframe quad.
+      const [wall_a, wall_b] = wall;
+      const anchors: { x: number; hh: number; u: number }[] = [];
+
+      for (const edge_coord of [wall_a, wall_b]) {
+        const angle = fix_degrees((Math.atan2(edge_coord[1] - camera.coords[1], edge_coord[0] - camera.coords[0]) * 180) / Math.PI);
+        if (in_frustum(angle, cam_from, cam_to)) {
+          anchors.push({
+            x: angle_to_x(angle, cam_from, cam_to, canvas3D.width),
+            hh: half_height(distance(camera.coords, edge_coord), canvas3D.height, line_length),
+            u: wall_param(edge_coord, wall_a, wall_b),
+          });
+        }
+      }
+      if (hit_from !== undefined) {
+        anchors.push({
+          x: 0,
+          hh: half_height(distance(camera.coords, hit_from), canvas3D.height, line_length),
+          u: wall_param(hit_from, wall_a, wall_b),
+        });
+      }
+      if (hit_to !== undefined) {
+        anchors.push({
+          x: canvas3D.width,
+          hh: half_height(distance(camera.coords, hit_to), canvas3D.height, line_length),
+          u: wall_param(hit_to, wall_a, wall_b),
+        });
       }
 
       if (anchors.length >= 2) {
         anchors.sort((a, b) => a.x - b.x);
         const left = anchors[0];
         const right = anchors[anchors.length - 1];
-        ctx3D.beginPath();
-        ctx3D.moveTo(left.x, canvas3D.height / 2 + left.hh);
-        ctx3D.lineTo(right.x, canvas3D.height / 2 + right.hh);
-        ctx3D.lineTo(right.x, canvas3D.height / 2 - right.hh);
-        ctx3D.lineTo(left.x, canvas3D.height / 2 - left.hh);
-        ctx3D.lineTo(left.x, canvas3D.height / 2 + left.hh);
-        ctx3D.stroke();
+        const img = wall_textures[wall[2]];
+        const ready = img.complete && img.naturalWidth > 0;
+        for (let x = Math.ceil(left.x); x <= Math.floor(right.x); x++) {
+          const f = (x - left.x) / (right.x - left.x);
+          const hh = left.hh + (right.hh - left.hh) * f;
+          const top = Math.round(canvas3D.height / 2 - hh);
+          const bottom = Math.round(canvas3D.height / 2 + hh);
+          if (bottom <= top) {
+            continue;
+          }
+          if (ready) {
+            const u = Math.floor((left.u + (right.u - left.u) * f) * img.width) % img.width;
+            ctx3D.drawImage(img, u, 0, 1, img.height, x, top, 1, bottom - top);
+          } else {
+            ctx3D.fillStyle = "#6a6a6a";
+            ctx3D.fillRect(x, top, 1, bottom - top);
+          }
+        }
       }
     }
 
   }, []);
 
   useEffect(() => {
+    for (const img of Object.values(wall_textures)) {
+      if (!img.complete) {
+        img.onload = () => { redraw(); };
+      }
+    }
     redraw();
     document.onkeydown = (e: KeyboardEvent): void => {
 
