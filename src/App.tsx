@@ -55,8 +55,33 @@ const distance = (p1: Coords, p2: Coords): number => {
   return c;
 }
 
+const in_frustum = (angle: number, from: number, to: number): boolean => {
+  if (from <= to) {
+    return angle >= from && angle <= to;
+  }
+  return angle >= from || angle <= to;
+}
+
+const angle_to_x = (angle: number, from: number, to: number, width: number): number => {
+  const total = from <= to ? to - from : to - from + 360;
+  const span = angle >= from ? angle - from : angle - from + 360;
+  return (span / total) * width;
+}
+
+const half_height = (dist: number, height: number, max_dist: number): number => {
+  return Math.max(0, height / 2 - (dist / max_dist) * (height / 2));
+}
+
+const dist_to_segment = (p: Coords, a: Coords, b: Coords): number => {
+  const dx = b[0] - a[0];
+  const dy = b[1] - a[1];
+  const t = Math.max(0, Math.min(1, ((p[0] - a[0]) * dx + (p[1] - a[1]) * dy) / (dx * dx + dy * dy)));
+  return Math.hypot(p[0] - (a[0] + t * dx), p[1] - (a[1] + t * dy));
+}
+
 const walls: Wall[] = [
-  [[10, 10], [300, 150]]
+  [[10, 10], [300, 150]],
+  [[300, 150], [300, 200]]
 ];
 
 interface Camera {
@@ -102,11 +127,11 @@ function App() {
     }
 
     const cam_angle = fix_degrees(camera.direction);
-    const cam_from = cam_angle - (camera.angle / 2);
-    const cam_to = cam_angle + (camera.angle / 2);
+    const cam_from = fix_degrees(cam_angle - (camera.angle / 2));
+    const cam_to = fix_degrees(cam_angle + (camera.angle / 2));
 
     ctx.beginPath();
-    ctx.arc(camera.coords[0], camera.coords[1], 15, dtr(cam_to), dtr(cam_from));
+    ctx.arc(camera.coords[0], camera.coords[1], 15, dtr(cam_from), dtr(cam_to));
     ctx.stroke();
 
 
@@ -124,65 +149,55 @@ function App() {
     ctx.lineTo(x2_add, y2_add);
     ctx.stroke();
 
-    for (const wall of walls) {
-      const visible_wall_edges: Coords[] = []
+    // Draw far walls first so nearer walls paint over them (painter's algorithm).
+    const walls_by_depth = [...walls].sort(
+      (a, b) => dist_to_segment(camera.coords, b[0], b[1]) - dist_to_segment(camera.coords, a[0], a[1])
+    );
 
-      const intersect1 = intersect(camera.coords[0], camera.coords[1], x1_add, y1_add, wall[0][0], wall[0][1], wall[1][0], wall[1][1])
-      if (intersect1 !== undefined) {
-        ctx.beginPath();
-        ctx.arc(intersect1[0], intersect1[1], 5, 0, 2 * Math.PI);
-        ctx.stroke();
-        visible_wall_edges.push(intersect1);
+    for (const wall of walls_by_depth) {
+      // 3D view: screen anchors for the wall's visible part.
+      // Anchors = wall endpoints inside the frustum (projected by angle -> x)
+      // plus wall/frustum-boundary intersections (at x = 0 / x = width).
+      // The wall is drawn as a quad spanning its extreme anchors.
+      const anchors: { x: number; hh: number }[] = [];
+
+      for (const edge_coord of wall) {
+        const edge_angle = fix_degrees((Math.atan2(edge_coord[1] - camera.coords[1], edge_coord[0] - camera.coords[0]) * 180) / Math.PI);
+        if (in_frustum(edge_angle, cam_from, cam_to)) {
+          anchors.push({
+            x: angle_to_x(edge_angle, cam_from, cam_to, canvas3D.width),
+            hh: half_height(distance(camera.coords, edge_coord), canvas3D.height, line_length),
+          });
+        }
       }
-      const intersect2 = intersect(camera.coords[0], camera.coords[1], x2_add, y2_add, wall[0][0], wall[0][1], wall[1][0], wall[1][1])
-      if (intersect2 !== undefined) {
+
+      const hit_from = intersect(camera.coords[0], camera.coords[1], x1_add, y1_add, wall[0][0], wall[0][1], wall[1][0], wall[1][1]);
+      if (hit_from !== undefined) {
         ctx.beginPath();
-        ctx.arc(intersect2[0], intersect2[1], 5, 0, 2 * Math.PI);
+        ctx.arc(hit_from[0], hit_from[1], 5, 0, 2 * Math.PI);
         ctx.stroke();
-        visible_wall_edges.push(intersect2);
+        anchors.push({ x: 0, hh: half_height(distance(camera.coords, hit_from), canvas3D.height, line_length) });
+      }
+      const hit_to = intersect(camera.coords[0], camera.coords[1], x2_add, y2_add, wall[0][0], wall[0][1], wall[1][0], wall[1][1]);
+      if (hit_to !== undefined) {
+        ctx.beginPath();
+        ctx.arc(hit_to[0], hit_to[1], 5, 0, 2 * Math.PI);
+        ctx.stroke();
+        anchors.push({ x: canvas3D.width, hh: half_height(distance(camera.coords, hit_to), canvas3D.height, line_length) });
       }
 
-      if (visible_wall_edges.length === 2) {
-        const dist1 = distance(camera.coords, visible_wall_edges[0]);
-        const dist2 = distance(camera.coords, visible_wall_edges[1]);
-        const p1_hh = canvas3D.height / 2 - (dist1 / line_length) * canvas3D.height / 2
-        const p2_hh = canvas3D.height / 2 - (dist2 / line_length) * canvas3D.height / 2
-
+      if (anchors.length >= 2) {
+        anchors.sort((a, b) => a.x - b.x);
+        const left = anchors[0];
+        const right = anchors[anchors.length - 1];
         ctx3D.beginPath();
-        ctx3D.moveTo(0, canvas3D.height / 2 + p1_hh);
-        ctx3D.lineTo(canvas3D.width, canvas3D.height / 2 + p2_hh);
-        ctx3D.lineTo(canvas3D.width, canvas3D.height / 2 - p2_hh);
-        ctx3D.lineTo(0, canvas3D.height / 2 - p1_hh);
-        ctx3D.lineTo(0, canvas3D.height / 2 + p1_hh);
+        ctx3D.moveTo(left.x, canvas3D.height / 2 + left.hh);
+        ctx3D.lineTo(right.x, canvas3D.height / 2 + right.hh);
+        ctx3D.lineTo(right.x, canvas3D.height / 2 - right.hh);
+        ctx3D.lineTo(left.x, canvas3D.height / 2 - left.hh);
+        ctx3D.lineTo(left.x, canvas3D.height / 2 + left.hh);
         ctx3D.stroke();
       }
-      else if (visible_wall_edges.length === 1) {
-        for (const edge_coord of wall) {
-          const dist_camera_edge = distance(camera.coords, edge_coord);
-          const dist_y = camera.coords[1] - edge_coord[1];
-          const alpha = 2 * Math.PI - Math.asin(dist_y / dist_camera_edge);
-          const camera_angles = [dtr(cam_from), dtr(cam_to)].sort()
-          if (alpha > camera_angles[0] && alpha < camera_angles[1]) {
-            const angle_diff = Math.abs(camera_angles[0] - camera_angles[1])
-            const point_diff = Math.abs(camera_angles[0] - alpha)
-            const left_dist = (point_diff / angle_diff) * canvas3D.width;
-            console.error(left_dist)
-            const dist1 = distance(camera.coords, visible_wall_edges[0]);
-            const dist_inside = distance(camera.coords, edge_coord);
-            const p1_hh = canvas3D.height / 2 - (dist1 / line_length) * canvas3D.height / 2
-            const p2_hh = canvas3D.height / 2 - (dist_inside / line_length) * canvas3D.height / 2
-            ctx3D.beginPath();
-            ctx3D.moveTo(0, canvas3D.height / 2 + p1_hh);
-            ctx3D.lineTo(left_dist, canvas3D.height / 2 + p2_hh);
-            ctx3D.lineTo(left_dist, canvas3D.height / 2 - p2_hh);
-            ctx3D.lineTo(0, canvas3D.height / 2 - p1_hh);
-            ctx3D.lineTo(0, canvas3D.height / 2 + p1_hh);
-            ctx3D.stroke();
-          }
-        }
-        console.error("=====")
-      }
-
     }
 
   }, []);
