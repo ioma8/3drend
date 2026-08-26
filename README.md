@@ -19,13 +19,16 @@ cargo binstall wasm-pack   # or: cargo install wasm-pack
 ./build.sh                 # wasm-pack build --target web --release --out-dir public/pkg
 ```
 
-## Run
+## Native (winit)
+
+The same core, compiled to a native desktop app:
 
 ```sh
-node serve.mjs             # static server on http://localhost:3000 (public/)
+cargo run --features native                  # opens a window
+cargo run --features native -- --frames 60 --dump frame.rgba   # verify: render 60 frames, dump raw RGBA, exit
 ```
 
-Open http://localhost:3000. Controls: WASD move, arrow keys turn/pitch.
+`DREND_ASSETS` overrides the asset directory (default `./public`). Controls are the same; the numeric output matches the browser build pixel-for-pixel.
 
 ## Test
 
@@ -37,6 +40,8 @@ verified against the previous renderers, OBJ/MTL parsing, world structure).
 - `src/math.rs` — column-major 4x4 matrix math (exact port of the engine's camera math)
 - `src/obj.rs` — OBJ + MTL parser and asset types
 - `src/world.rs` — scene assembly: ground, terrain, buildings, downloaded models
-- `src/renderer.rs` — wgpu renderer: pipeline, per-texture draw groups, readback
-- `src/lib.rs` — wasm entry: app state, camera, input, frame loop
+- `src/renderer.rs` — wgpu renderer: pipeline, per-texture draw groups, readback (platform-agnostic)
+- `src/app.rs` — shared camera + input state (used by both frontends)
+- `src/lib.rs` — wasm-bindgen glue and `App` (shared app state)
+- `src/main.rs` — winit desktop frontend (`--features native`)
 - `public/` — static web root: page, JS glue, models, textures, `pkg/` (build output)

@@ -1,11 +1,11 @@
 //! WebGPU renderer: same world and camera math as the engines before it,
 //! with triangle rasterization (depth test, texturing) on the GPU.
+//! Platform-agnostic: frontends create the `wgpu::Instance` + `Surface`
+//! (canvas on wasm, window on native) and pass them in.
 
 use crate::math::Mat4;
 use crate::obj::{Mesh, Texture, Tri};
 use std::collections::HashMap;
-use wasm_bindgen::JsValue;
-use web_sys::HtmlCanvasElement;
 
 const STRIDE: u64 = 32; // pos3 + uv2 + color3
 const SKY: [f32; 3] = [232.0 / 255.0, 200.0 / 255.0, 156.0 / 255.0];
@@ -74,14 +74,13 @@ pub struct Renderer {
 
 impl Renderer {
     pub async fn new(
-        canvas: HtmlCanvasElement,
+        instance: wgpu::Instance,
+        surface: wgpu::Surface<'static>,
         w: u32,
         h: u32,
         textures: &[Texture],
         meshes: &[Mesh],
-    ) -> Result<Renderer, JsValue> {
-        let instance = wgpu::Instance::new(&wgpu::InstanceDescriptor::default());
-        let surface = make_surface(&instance, canvas)?;
+    ) -> Result<Renderer, String> {
         let adapter = instance
             .request_adapter(&wgpu::RequestAdapterOptions {
                 compatible_surface: Some(&surface),
@@ -89,7 +88,7 @@ impl Renderer {
                 force_fallback_adapter: false,
             })
             .await
-            .map_err(js_err)?;
+            .map_err(|e| e.to_string())?;
         let (device, queue) = adapter
             .request_device(&wgpu::DeviceDescriptor {
                 label: None,
@@ -99,11 +98,27 @@ impl Renderer {
                 trace: wgpu::Trace::Off,
             })
             .await
-            .map_err(js_err)?;
-        let format = surface.get_capabilities(&adapter).formats[0];
-        let config = surface
-            .get_default_config(&adapter, w, h)
-            .ok_or_else(|| JsValue::from_str("no surface config"))?;
+            .map_err(|e| e.to_string())?;
+        // Prefer a plain (non-sRGB) format so readback bytes match the wasm
+        // canvas exactly; Metal lists Bgra8UnormSrgb first by default.
+        let formats = surface.get_capabilities(&adapter).formats;
+        let format = if formats.contains(&wgpu::TextureFormat::Bgra8Unorm) {
+            wgpu::TextureFormat::Bgra8Unorm
+        } else if formats.contains(&wgpu::TextureFormat::Rgba8Unorm) {
+            wgpu::TextureFormat::Rgba8Unorm
+        } else {
+            formats[0]
+        };
+        let config = wgpu::SurfaceConfiguration {
+            usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
+            format,
+            width: w,
+            height: h,
+            present_mode: wgpu::PresentMode::Fifo,
+            alpha_mode: wgpu::CompositeAlphaMode::Auto,
+            view_formats: vec![],
+            desired_maximum_frame_latency: 2,
+        };
         surface.configure(&device, &config);
         let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: None,
@@ -293,7 +308,7 @@ impl Renderer {
 
     /// Render the current camera into the offscreen target and read it back
     /// as tightly packed RGBA bytes (used for numeric verification).
-    pub async fn read_frame(&mut self) -> Result<Vec<u8>, JsValue> {
+    pub async fn read_frame(&mut self) -> Result<Vec<u8>, String> {
         self.queue.write_buffer(&self.uniform, 0, bytemuck::cast_slice(&[self.view_proj.0]));
         let off_view = self.off.create_view(&Default::default());
         self.queue.submit([self.encode(&off_view)]);
@@ -318,14 +333,14 @@ impl Renderer {
             let _ = self.device.poll(wgpu::PollType::Wait);
             match rx.await {
                 Ok(Ok(())) => {}
-                _ => return Err(JsValue::from_str("buffer map failed")),
+                _ => return Err(String::from("buffer map failed")),
             }
             let data = slice.get_mapped_range().to_vec();
             data
         };
         self.readbuf.unmap();
         let mut data = data;
-        if self.format == wgpu::TextureFormat::Bgra8Unorm {
+        if matches!(self.format, wgpu::TextureFormat::Bgra8Unorm | wgpu::TextureFormat::Bgra8UnormSrgb) {
             for px in data.chunks_exact_mut(4) {
                 px.swap(0, 2);
             }
@@ -364,22 +379,10 @@ impl Renderer {
         }
         enc.finish()
     }
-}
 
-fn js_err(e: impl std::fmt::Display) -> JsValue {
-    JsValue::from_str(&e.to_string())
-}
-
-// Canvas -> surface; on non-wasm targets there is no web canvas.
-fn make_surface(instance: &wgpu::Instance, canvas: HtmlCanvasElement) -> Result<wgpu::Surface<'static>, JsValue> {
-    #[cfg(target_arch = "wasm32")]
-    {
-        instance.create_surface(wgpu::SurfaceTarget::Canvas(canvas)).map_err(js_err)
-    }
-    #[cfg(not(target_arch = "wasm32"))]
-    {
-        let _ = (instance, canvas);
-        Err(JsValue::from_str("native target is not supported"))
+    /// Surface dimensions in physical pixels.
+    pub fn dims(&self) -> (u32, u32) {
+        (self.w, self.h)
     }
 }
 

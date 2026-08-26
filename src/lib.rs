@@ -1,22 +1,20 @@
-//! 3drend — vector-projection 3D engine rendered with WebGPU (wgpu crate,
-//! compiled to WASM). The Rust core owns the world, camera, and renderer;
-//! a thin JS glue supplies decoded assets, input, and the frame loop.
+//! 3drend — vector-projection 3D engine rendered with WebGPU (wgpu crate).
+//! The core (world, camera, renderer) is platform-agnostic; frontends:
+//! - wasm: this module's wasm-bindgen glue + a thin JS shell
+//! - native: `src/main.rs` (winit) via the `native` cargo feature
 
-mod math;
-mod obj;
-mod renderer;
-mod world;
+pub mod app;
+pub mod math;
+pub mod obj;
+pub mod renderer;
+pub mod world;
 
+use crate::app::{Camera, KeyState};
 use crate::obj::Texture;
 use crate::renderer::Renderer;
-use crate::world::{build_world, Footprint, Marker, ModelAssets};
-use serde::{Deserialize, Serialize};
+use crate::world::{build_world, Footprint, Marker, ModelAssets, World};
+use serde::Deserialize;
 use wasm_bindgen::prelude::*;
-
-const VIEW_W: u32 = 640;
-const VIEW_H: u32 = 360;
-const MOVE_SPEED: f32 = 40.0; // world units / second
-const TURN_SPEED: f32 = 1.6; // radians / second
 
 /// RGBA image bytes. Deserialized through `deserialize_any` so
 /// serde-wasm-bindgen uses its fast `byte_buf` copy path; plain `Vec<u8>`
@@ -79,37 +77,47 @@ struct Assets {
     backpack: ModelIn,
 }
 
-#[derive(Clone, Copy, Default)]
-struct Keys {
-    w: bool,
-    s: bool,
-    a: bool,
-    d: bool,
-    left: bool,
-    right: bool,
-    up: bool,
-    down: bool,
-}
-
-#[derive(Clone, Copy, Serialize)]
-struct Camera {
-    x: f32,
-    y: f32,
-    z: f32,
-    yaw: f32,
-    pitch: f32,
-}
-
 /// The whole app: camera, input state, renderer, and the minimap data.
+/// Shared by both frontends.
 #[wasm_bindgen]
 pub struct App {
     renderer: Renderer,
     cam: Camera,
-    keys: Keys,
+    keys: KeyState,
     proj: math::Mat4,
     view_proj: math::Mat4,
     footprints: Vec<Footprint>,
     markers: Vec<Marker>,
+}
+
+impl App {
+    /// Platform-agnostic constructor from a ready renderer + world.
+    pub fn from_parts(renderer: Renderer, world: World) -> App {
+        let (w, h) = renderer.dims();
+        App {
+            cam: Camera::default(),
+            keys: KeyState::default(),
+            proj: math::Mat4::perspective(70.0_f32.to_radians(), w as f32 / h as f32, 0.05, 1000.0),
+            view_proj: math::Mat4([0.0; 16]),
+            footprints: world.footprints,
+            markers: world.markers,
+            renderer,
+        }
+    }
+}
+
+// WebGPU instance + surface from the page canvas (wasm frontend only).
+#[cfg(target_arch = "wasm32")]
+fn make_instance_surface(canvas: web_sys::HtmlCanvasElement) -> Result<(wgpu::Instance, wgpu::Surface<'static>), String> {
+    let instance = wgpu::Instance::new(&wgpu::InstanceDescriptor::default());
+    let surface = instance
+        .create_surface(wgpu::SurfaceTarget::Canvas(canvas))
+        .map_err(|e| e.to_string())?;
+    Ok((instance, surface))
+}
+#[cfg(not(target_arch = "wasm32"))]
+fn make_instance_surface(_canvas: web_sys::HtmlCanvasElement) -> Result<(wgpu::Instance, wgpu::Surface<'static>), String> {
+    Err(String::from("wasm-only surface creation"))
 }
 
 #[wasm_bindgen]
@@ -133,76 +141,22 @@ impl App {
         };
         let world = build_world(&mut textures, mk(tree), mk(spider), mk(wuson), mk(backpack));
 
-        let renderer = Renderer::new(canvas, VIEW_W, VIEW_H, &textures, &world.meshes).await?;
-        Ok(App {
-            cam: Camera { x: 0.0, y: 30.0, z: -70.0, yaw: 0.0, pitch: -0.4 },
-            keys: Keys::default(),
-            proj: math::Mat4::perspective(70.0_f32.to_radians(), VIEW_W as f32 / VIEW_H as f32, 0.05, 1000.0),
-            view_proj: math::Mat4([0.0; 16]),
-            footprints: world.footprints,
-            markers: world.markers,
-            renderer,
-        })
+        let (instance, surface) = make_instance_surface(canvas).map_err(|e| JsValue::from_str(&e))?;
+        let renderer = Renderer::new(instance, surface, VIEW_W, VIEW_H, &textures, &world.meshes)
+            .await
+            .map_err(|e| JsValue::from_str(&e))?;
+        Ok(App::from_parts(renderer, world))
     }
 
     /// Set the state of one key (called from JS on keydown/keyup).
     pub fn key(&mut self, code: &str, down: bool) {
-        let k = &mut self.keys;
-        match code {
-            "w" => k.w = down,
-            "s" => k.s = down,
-            "a" => k.a = down,
-            "d" => k.d = down,
-            "ArrowLeft" => k.left = down,
-            "ArrowRight" => k.right = down,
-            "ArrowUp" => k.up = down,
-            "ArrowDown" => k.down = down,
-            _ => {}
-        }
+        self.keys.set(code, down);
     }
 
     /// Advance the simulation and render one frame.
     pub fn tick(&mut self, dt: f32) {
-        let dt = dt.min(0.05);
-        // movement: forward = (sin yaw, 0, cos yaw)
-        let (fx, fz) = (self.cam.yaw.sin(), self.cam.yaw.cos());
-        let (rx, rz) = (self.cam.yaw.cos(), -self.cam.yaw.sin());
-        let (mut mx, mut mz) = (0.0f32, 0.0f32);
-        if self.keys.w {
-            mx += fx;
-            mz += fz;
-        }
-        if self.keys.s {
-            mx -= fx;
-            mz -= fz;
-        }
-        if self.keys.a {
-            mx -= rx;
-            mz -= rz;
-        }
-        if self.keys.d {
-            mx += rx;
-            mz += rz;
-        }
-        let mlen = (mx * mx + mz * mz).sqrt();
-        if mlen > 0.0 {
-            self.cam.x += (mx / mlen) * MOVE_SPEED * dt;
-            self.cam.z += (mz / mlen) * MOVE_SPEED * dt;
-        }
-        if self.keys.left {
-            self.cam.yaw -= TURN_SPEED * dt;
-        }
-        if self.keys.right {
-            self.cam.yaw += TURN_SPEED * dt;
-        }
-        if self.keys.up {
-            self.cam.pitch = (self.cam.pitch + TURN_SPEED * 0.5 * dt).min(1.5);
-        }
-        if self.keys.down {
-            self.cam.pitch = (self.cam.pitch - TURN_SPEED * 0.5 * dt).max(-1.5);
-        }
-
-        let view = math::Mat4::view(self.cam.yaw, self.cam.pitch, [self.cam.x, self.cam.y, self.cam.z]);
+        self.cam.step(&self.keys, dt);
+        let view = self.cam.view();
         self.view_proj = self.proj.multiply(&view);
         self.renderer.render(&self.view_proj);
     }
@@ -223,7 +177,9 @@ impl App {
     /// (verification seam).
     #[wasm_bindgen(js_name = readFrame)]
     pub async fn read_frame(&mut self) -> Result<Vec<u8>, JsValue> {
-        self.renderer.read_frame().await
+        self.renderer.read_frame().await.map_err(|e| JsValue::from_str(&e))
     }
 }
 
+const VIEW_W: u32 = 640;
+const VIEW_H: u32 = 360;
