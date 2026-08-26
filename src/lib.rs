@@ -1,20 +1,24 @@
-//! 3drend — vector-projection 3D engine rendered with WebGPU (wgpu crate).
-//! The core (world, camera, renderer) is platform-agnostic; frontends:
+//! 3drend — polygon-projection 3D engine with a Doom-style game on top.
+//! The core (game, camera, renderer) is platform-agnostic; frontends:
 //! - wasm: this module's wasm-bindgen glue + a thin JS shell
 //! - native: `src/main.rs` (winit) via the `native` cargo feature
 
 pub mod app;
+pub mod game;
 pub mod math;
 pub mod obj;
 pub mod renderer;
 pub mod world;
 
-use crate::app::{Camera, KeyState};
+use crate::app::{KeyState, TURN_SPEED};
+use crate::game::{Game, Input};
 use crate::obj::Texture;
 use crate::renderer::{Renderer, SurfaceFactory};
-use crate::world::{build_world, Footprint, Marker, ModelAssets, World};
+use crate::world::ModelAssets;
 use serde::Deserialize;
 use wasm_bindgen::prelude::*;
+
+const MOUSE_SENS: f32 = 0.0025; // radians per pixel
 
 /// RGBA image bytes. Deserialized through `deserialize_any` so
 /// serde-wasm-bindgen uses its fast `byte_buf` copy path; plain `Vec<u8>`
@@ -71,37 +75,34 @@ struct ModelIn {
 #[derive(Deserialize)]
 struct Assets {
     world: Vec<TexIn>,
-    tree: ModelIn,
     spider: ModelIn,
     wuson: ModelIn,
-    backpack: ModelIn,
 }
 
-/// The whole app: camera, input state, renderer, and the minimap data.
-/// Shared by both frontends.
+/// The whole app: the game simulation, input state, and the renderer.
 #[wasm_bindgen]
 pub struct App {
     renderer: Renderer,
-    cam: Camera,
+    game: Game,
     keys: KeyState,
+    mouse_dx: f32,
+    mouse_dy: f32,
     proj: math::Mat4,
     view_proj: math::Mat4,
-    footprints: Vec<Footprint>,
-    markers: Vec<Marker>,
 }
 
 impl App {
-    /// Platform-agnostic constructor from a ready renderer + world.
-    pub fn from_parts(renderer: Renderer, world: World) -> App {
+    /// Platform-agnostic constructor from a ready renderer + game.
+    pub fn from_parts(renderer: Renderer, game: Game) -> App {
         let (w, h) = renderer.dims();
         App {
-            cam: Camera::default(),
+            renderer,
+            game,
             keys: KeyState::default(),
+            mouse_dx: 0.0,
+            mouse_dy: 0.0,
             proj: math::Mat4::perspective(70.0_f32.to_radians(), w as f32 / h as f32, 0.05, 1000.0),
             view_proj: math::Mat4([0.0; 16]),
-            footprints: world.footprints,
-            markers: world.markers,
-            renderer,
         }
     }
 }
@@ -123,14 +124,12 @@ fn canvas_surface_factory(_canvas: web_sys::HtmlCanvasElement) -> SurfaceFactory
 
 #[wasm_bindgen]
 impl App {
-    /// Create the renderer and build the world from JS-decoded assets.
+    /// Create the renderer and the game from JS-decoded assets.
     #[wasm_bindgen(js_name = create)]
     pub async fn create(canvas: web_sys::HtmlCanvasElement, assets: JsValue) -> Result<App, JsValue> {
-        // Move the decoded image bytes straight into Rust textures: zero
-        // copies after the serde transfer.
-        let Assets { world, tree, spider, wuson, backpack } = serde_wasm_bindgen::from_value(assets)
+        let Assets { world, spider, wuson } = serde_wasm_bindgen::from_value(assets)
             .map_err(|e| JsValue::from_str(&e.to_string()))?;
-        let mut textures: Vec<Texture> = world
+        let world: Vec<Texture> = world
             .into_iter()
             .map(|t| Texture { w: t.w, h: t.h, data: t.data.0 })
             .collect();
@@ -140,7 +139,7 @@ impl App {
             images: m.images.into_iter().map(|i| (i.file, Texture { w: i.w, h: i.h, data: i.data.0 })).collect(),
             fallback: m.fallback,
         };
-        let world = build_world(&mut textures, mk(tree), mk(spider), mk(wuson), mk(backpack));
+        let game = Game::new(world, mk(spider), mk(wuson));
 
         let width = canvas.width().max(1);
         let height = canvas.height().max(1);
@@ -149,17 +148,22 @@ impl App {
             wgpu::PresentMode::Fifo,
             width,
             height,
-            &textures,
-            &world.meshes,
+            game.textures(),
         )
         .await
         .map_err(|e| JsValue::from_str(&e))?;
-        Ok(App::from_parts(renderer, world))
+        Ok(App::from_parts(renderer, game))
     }
 
     /// Set the state of one key (called from JS on keydown/keyup).
     pub fn key(&mut self, code: &str, down: bool) {
         self.keys.set(code, down);
+    }
+
+    /// Accumulate mouse movement (radians applied on the next tick).
+    pub fn look(&mut self, dx: f32, dy: f32) {
+        self.mouse_dx += dx;
+        self.mouse_dy += dy;
     }
 
     /// Resize the render surface in physical pixels and update projection.
@@ -176,28 +180,40 @@ impl App {
 
     /// Advance the simulation and render one frame.
     pub fn tick(&mut self, dt: f32) {
-        self.cam.step(&self.keys, dt);
-        let view = self.cam.view();
+        let k = &self.keys;
+        let forward = (k.w as i32 - k.s as i32) as f32;
+        let strafe = (k.d as i32 - k.a as i32) as f32;
+        let turn = ((k.right as i32 - k.left as i32) as f32) * TURN_SPEED * dt;
+        let look_yaw = self.mouse_dx * MOUSE_SENS;
+        let look_pitch = -self.mouse_dy * MOUSE_SENS + ((k.up as i32 - k.down as i32) as f32) * TURN_SPEED * 0.5 * dt;
+        self.mouse_dx = 0.0;
+        self.mouse_dy = 0.0;
+        let switch = if k.digit_1 { 0 } else if k.digit_2 { 1 } else if k.digit_3 { 2 } else { -1 };
+
+        let input = Input {
+            forward,
+            strafe,
+            turn,
+            look_yaw,
+            look_pitch,
+            fire: k.space,
+            use_door: k.key_e,
+            switch,
+        };
+        self.game.update(dt, &input);
+
+        let view = self.game.camera().view();
         self.view_proj = self.proj.multiply(&view);
-        self.renderer.render(&self.view_proj);
-    }
-
-    pub fn cam(&self) -> JsValue {
-        serde_wasm_bindgen::to_value(&self.cam).unwrap()
-    }
-
-    pub fn footprints(&self) -> JsValue {
-        serde_wasm_bindgen::to_value(&self.footprints).unwrap()
-    }
-
-    pub fn markers(&self) -> JsValue {
-        serde_wasm_bindgen::to_value(&self.markers).unwrap()
+        let meshes = self.game.meshes();
+        let hud = self.game.hud();
+        self.renderer.render(&self.view_proj, &meshes, &hud);
     }
 
     /// Render the current frame offscreen and read back RGBA bytes
-    /// (verification seam).
+    /// (verification seam; HUD excluded).
     #[wasm_bindgen(js_name = readFrame)]
     pub async fn read_frame(&mut self) -> Result<Vec<u8>, JsValue> {
-        self.renderer.read_frame().await.map_err(|e| JsValue::from_str(&e))
+        let meshes = self.game.meshes();
+        self.renderer.read_frame(&meshes).await.map_err(|e| JsValue::from_str(&e))
     }
 }

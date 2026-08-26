@@ -1,19 +1,17 @@
 // Thin glue between the page and the Rust core: asset I/O (fetch, image
-// decode), input events, the frame loop, and the minimap overlay.
-// All geometry, camera, and rendering live in Rust (wasm-bindgen + wgpu).
-// The ?v= query busts the browser's module cache across rebuilds.
+// decode), input (pointer lock + keyboard), and the frame loop.
+// All game logic, camera, and rendering live in Rust (wasm-bindgen + wgpu).
 const { default: init, App } = await import('../pkg/drend.js?v=' + Date.now());
 
-// World textures, in the order Rust assigns their indices (0..5).
+// World textures, in the order Rust assigns their indices: floor, wall,
+// door, ceiling.
 const WORLD_TEX = [
-  ['worldmap', 'jpg'],
   ['grasslight', 'jpg'],
   ['wall1', 'png'],
   ['wall2', 'png'],
   ['roof', 'png'],
-  ['tree', 'png'],
 ];
-const MODELS = ['tree.obj', 'spider.obj', 'WusonOBJ.obj', 'backpack.obj'];
+const MODELS = ['spider.obj', 'WusonOBJ.obj'];
 
 async function loadRgba(url) {
   const img = new Image();
@@ -59,23 +57,20 @@ async function loadModel(name) {
 async function main() {
   await init();
   const canvas = document.getElementById('view');
-  const mini = document.getElementById('mini');
-  const miniCtx = mini.getContext('2d');
 
-  const [worldmap, grasslight, wall1, wall2, roof, tree] = await Promise.all(
+  const [floor, wall, door, ceil] = await Promise.all(
     WORLD_TEX.map(([n, ext]) => loadRgba('textures/' + n + '.' + ext)),
   );
-  const [treeM, spiderM, wusonM, backpackM] = await Promise.all(MODELS.map(loadModel));
-  treeM.fallback = 5; // tree texture index (world textures above)
+  const [spiderM, wusonM] = await Promise.all(MODELS.map(loadModel));
 
   const assets = {
-    world: [worldmap, grasslight, wall1, wall2, roof, tree],
-    tree: treeM,
+    world: [floor, wall, door, ceil],
     spider: spiderM,
     wuson: wusonM,
-    backpack: backpackM,
   };
   const app = await App.create(canvas, assets);
+  window.__rust = { app, readFrame: () => app.readFrame() };
+
   const resize = () => {
     const rect = canvas.getBoundingClientRect();
     if (rect.width === 0 || rect.height === 0) return;
@@ -89,63 +84,45 @@ async function main() {
     }
   };
   const resizeObserver = new ResizeObserver(resize);
-  window.addEventListener('resize', resize);
   resizeObserver.observe(canvas);
+  window.addEventListener('resize', resize);
   resize();
-  window.__rust = {
-    app,
-    readFrame: () => app.readFrame(),
-    resizeObserver,
+
+  // Keyboard: map the space key's " " to "Space" so it matches the native
+  // frontend's key codes.
+  const key = (e, down) => {
+    const code = e.key === ' ' ? 'Space' : e.key;
+    app.key(code, down);
+    if (e.key.startsWith('Arrow') || e.key === ' ') e.preventDefault();
   };
+  document.addEventListener('keydown', (e) => key(e, true));
+  document.addEventListener('keyup', (e) => key(e, false));
 
-  const footprints = app.footprints();
-  const markers = app.markers();
-
-  document.addEventListener('keydown', (e) => {
-    app.key(e.key, true);
-    if (e.key.startsWith('Arrow')) e.preventDefault();
+  // Mouse look (pointer lock) and firing.
+  canvas.addEventListener('mousemove', (e) => {
+    if (document.pointerLockElement === canvas) app.look(e.movementX, e.movementY);
   });
-  document.addEventListener('keyup', (e) => app.key(e.key, false));
+  canvas.addEventListener('mousedown', (e) => {
+    if (e.button === 0) app.key('Space', true);
+    else if (e.button === 2) app.key('e', true);
+  });
+  canvas.addEventListener('mouseup', (e) => {
+    if (e.button === 0) app.key('Space', false);
+    else if (e.button === 2) app.key('e', false);
+  });
+  canvas.addEventListener('click', () => {
+    if (!document.pointerLockElement) canvas.requestPointerLock();
+  });
+  canvas.addEventListener('contextmenu', (e) => e.preventDefault());
 
   let last = performance.now();
   const loop = (now) => {
     const dt = Math.min(0.05, (now - last) / 1000);
     last = now;
     app.tick(dt);
-    drawMinimap(miniCtx, app.cam(), footprints, markers);
     requestAnimationFrame(loop);
   };
   requestAnimationFrame(loop);
-}
-
-function drawMinimap(ctx, cam, footprints, markers) {
-  const scale = 0.9; // 200 px / ~220 world units
-  const ox = 100;
-  const oy = 100;
-  const sx = (x) => ox + x * scale;
-  const sz = (z) => oy + z * scale;
-  ctx.fillStyle = '#14181d';
-  ctx.fillRect(0, 0, 200, 200);
-  ctx.strokeStyle = '#2a3a2a';
-  ctx.strokeRect(sx(-100), sz(-100), 200 * scale, 200 * scale);
-  ctx.fillStyle = '#5a6a7a';
-  for (const f of footprints) ctx.fillRect(sx(f.x), sz(f.z), f.w * scale, f.d * scale);
-  ctx.fillStyle = '#3a8a4a';
-  for (const m of markers) ctx.fillRect(sx(m.x) - 2, sz(m.z) - 2, 5, 5);
-  const camx = sx(cam.x);
-  const camz = sz(cam.z);
-  ctx.fillStyle = '#e8e020';
-  ctx.beginPath();
-  ctx.arc(camx, camz, 3, 0, 2 * Math.PI);
-  ctx.fill();
-  const halfFov = 35;
-  ctx.strokeStyle = '#e8e020';
-  ctx.beginPath();
-  ctx.moveTo(camx, camz);
-  ctx.lineTo(sx(cam.x + 30 * Math.sin(cam.yaw + halfFov * Math.PI / 180)), sz(cam.z + 30 * Math.cos(cam.yaw + halfFov * Math.PI / 180)));
-  ctx.moveTo(camx, camz);
-  ctx.lineTo(sx(cam.x + 30 * Math.sin(cam.yaw - halfFov * Math.PI / 180)), sz(cam.z + 30 * Math.cos(cam.yaw - halfFov * Math.PI / 180)));
-  ctx.stroke();
 }
 
 main().catch((err) => console.error('failed to start 3drend', err));

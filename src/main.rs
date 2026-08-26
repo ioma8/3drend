@@ -1,23 +1,25 @@
 //! Native desktop frontend: winit window + the same core as the wasm app
-//! (world, camera, renderer). Assets load from disk instead of fetch.
+//! (game, camera, renderer). Assets load from disk instead of fetch.
 //!
 //! Build/run: `cargo run --features native [-- --frames N --dump FILE]`
 //! `DREND_ASSETS` overrides the asset directory (default `./public`).
+//! Controls: WASD move, mouse look, click/space fire, E use, 1/2/3 weapons.
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Instant;
 
+use drend::game::Game;
 use drend::obj::Texture;
 use drend::renderer::{Renderer, SurfaceFactory};
-use drend::world::{build_world, ModelAssets, World};
+use drend::world::ModelAssets;
 use drend::App;
 use winit::application::ApplicationHandler;
 use winit::dpi::PhysicalSize;
-use winit::event::{ElementState, KeyEvent, WindowEvent};
+use winit::event::{DeviceEvent, ElementState, KeyEvent, MouseButton, WindowEvent};
 use winit::event_loop::{ActiveEventLoop, EventLoop};
 use winit::keyboard::{KeyCode, PhysicalKey};
-use winit::window::{Window, WindowId};
+use winit::window::{CursorGrabMode, Window, WindowId};
 
 const VIEW_W: u32 = 640;
 const VIEW_H: u32 = 360;
@@ -37,7 +39,17 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     let event_loop = EventLoop::new()?;
-    let mut frontend = Frontend { window: None, app: None, last: None, fps_clock: Instant::now(), fps_count: 0, frames: 0, max_frames, dump, uncapped };
+    let mut frontend = Frontend {
+        window: None,
+        app: None,
+        last: None,
+        fps_clock: Instant::now(),
+        fps_count: 0,
+        frames: 0,
+        max_frames,
+        dump,
+        uncapped,
+    };
     event_loop.run_app(&mut frontend)?;
     Ok(())
 }
@@ -59,17 +71,18 @@ impl Frontend {
         if self.window.is_some() {
             return Ok(());
         }
-        // The surface holds its own Arc<Window>, so it is 'static; the window
-        // lives as long as the app.
         let attrs = winit::window::WindowAttributes::default()
             .with_title("3drend")
             .with_inner_size(PhysicalSize::new(VIEW_W, VIEW_H));
         let window = Arc::new(event_loop.create_window(attrs).map_err(|e| e.to_string())?);
+        window.set_cursor_grab(CursorGrabMode::Locked).ok();
+        window.set_cursor_visible(false);
         window.focus_window();
         window.set_visible(true);
 
         let assets = std::env::var("DREND_ASSETS").unwrap_or_else(|_| String::from("./public"));
-        let (textures, world) = load_world(Path::new(&assets))?;
+        let (textures, spider, wuson) = load_assets(Path::new(&assets))?;
+        let game = Game::new(textures, spider, wuson);
 
         let size = window.inner_size();
         let surface_window = window.clone();
@@ -84,13 +97,12 @@ impl Frontend {
             present,
             size.width.max(1),
             size.height.max(1),
-            &textures,
-            &world.meshes,
+            game.textures(),
         ))?;
-        self.app = Some(App::from_parts(renderer, world));
+        self.app = Some(App::from_parts(renderer, game));
         self.last = Some(Instant::now());
         self.window = Some(window);
-        eprintln!("3drend: window ready (present: {present:?})");
+        eprintln!("3drend: ready (present: {present:?})");
         Ok(())
     }
 
@@ -129,6 +141,14 @@ impl ApplicationHandler for Frontend {
         }
     }
 
+    fn device_event(&mut self, _event_loop: &ActiveEventLoop, _device_id: winit::event::DeviceId, event: DeviceEvent) {
+        if let DeviceEvent::MouseMotion { delta } = event {
+            if let Some(app) = &mut self.app {
+                app.look(delta.0 as f32, delta.1 as f32);
+            }
+        }
+    }
+
     fn window_event(&mut self, event_loop: &ActiveEventLoop, _id: WindowId, event: WindowEvent) {
         match event {
             WindowEvent::CloseRequested => event_loop.exit(),
@@ -142,6 +162,22 @@ impl ApplicationHandler for Frontend {
                     KeyCode::ArrowRight => "ArrowRight",
                     KeyCode::ArrowUp => "ArrowUp",
                     KeyCode::ArrowDown => "ArrowDown",
+                    KeyCode::Space => "Space",
+                    KeyCode::KeyE => "e",
+                    KeyCode::Digit1 => "1",
+                    KeyCode::Digit2 => "2",
+                    KeyCode::Digit3 => "3",
+                    _ => return,
+                };
+                let down = state == ElementState::Pressed;
+                if let Some(app) = &mut self.app {
+                    app.key(code, down);
+                }
+            }
+            WindowEvent::MouseInput { state, button, .. } => {
+                let code = match button {
+                    MouseButton::Left => "Space",
+                    MouseButton::Right => "e",
                     _ => return,
                 };
                 let down = state == ElementState::Pressed;
@@ -183,20 +219,17 @@ impl ApplicationHandler for Frontend {
     }
 }
 
-/// Load the same scene the wasm glue assembles, from disk:
-/// 6 world textures in index order (0..5), then the 4 models.
-fn load_world(dir: &Path) -> Result<(Vec<Texture>, World), String> {
+/// Load the Doom assets: 4 world textures (floor, wall, door, ceiling) plus
+/// the two enemy models.
+fn load_assets(dir: &Path) -> Result<(Vec<Texture>, ModelAssets, ModelAssets), String> {
     let mut textures = Vec::new();
-    for (name, ext) in [("worldmap", "jpg"), ("grasslight", "jpg"), ("wall1", "png"), ("wall2", "png"), ("roof", "png"), ("tree", "png")] {
+    for (name, ext) in [("grasslight", "jpg"), ("wall1", "png"), ("wall2", "png"), ("roof", "png")] {
         textures.push(load_texture(&dir.join("textures").join(format!("{name}.{ext}")))?);
     }
     let models = dir.join("models");
-    let tree = load_model(&models, "tree.obj", 5)?; // tree texture index (world textures above)
     let spider = load_model(&models, "spider.obj", -1)?;
     let wuson = load_model(&models, "WusonOBJ.obj", -1)?;
-    let backpack = load_model(&models, "backpack.obj", -1)?;
-    let world = build_world(&mut textures, tree, spider, wuson, backpack);
-    Ok((textures, world))
+    Ok((textures, spider, wuson))
 }
 
 fn load_texture(path: &Path) -> Result<Texture, String> {

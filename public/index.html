@@ -2,7 +2,7 @@
 <html lang="en">
 <head>
   <meta charset="utf-8" />
-  <title>3drend</title>
+  <title>3drend — Doom</title>
   <style>
     body {
       margin: 0;
@@ -11,28 +11,24 @@
       color: #9aa4af;
       font: 13px/1.5 system-ui, sans-serif;
       display: flex;
-      flex-wrap: wrap;
-      gap: 16px;
+      flex-direction: column;
+      gap: 8px;
       align-items: flex-start;
     }
     #view {
-      width: min(640px, 100%);
+      width: min(800px, 100%);
       height: auto;
       aspect-ratio: 16 / 9;
       border: 1px solid #333;
       background: #000;
+      cursor: crosshair;
     }
-    #side { display: flex; flex-direction: column; gap: 8px; }
-    #mini { width: 200px; height: 200px; border: 1px solid #333; }
     #hud { opacity: 0.7; }
   </style>
 </head>
 <body>
-  <canvas id="view" width="640" height="360"></canvas>
-  <div id="side">
-    <canvas id="mini" width="200" height="200"></canvas>
-    <div id="hud">WASD move &middot; arrows turn / pitch</div>
-  </div>
-  <script type="module" src="/js/main.js?v=2"></script>
+  <canvas id="view" width="800" height="450"></canvas>
+  <div id="hud">WASD move &middot; mouse look (click to lock) &middot; click / space fire &middot; right-click / E use door &middot; 1/2/3 weapons</div>
+  <script type="module" src="/js/main.js?v=3"></script>
 </body>
 </html>

@@ -20,6 +20,11 @@ pub struct KeyState {
     pub right: bool,
     pub up: bool,
     pub down: bool,
+    pub space: bool,
+    pub key_e: bool,
+    pub digit_1: bool,
+    pub digit_2: bool,
+    pub digit_3: bool,
 }
 
 impl KeyState {
@@ -33,6 +38,11 @@ impl KeyState {
             "ArrowRight" => self.right = down,
             "ArrowUp" => self.up = down,
             "ArrowDown" => self.down = down,
+            "Space" => self.space = down,
+            "e" => self.key_e = down,
+            "1" => self.digit_1 = down,
+            "2" => self.digit_2 = down,
+            "3" => self.digit_3 = down,
             _ => {}
         }
     }

@@ -1,7 +1,9 @@
-//! WebGPU renderer: same world and camera math as the engines before it,
-//! with triangle rasterization (depth test, texturing) on the GPU.
+//! WebGPU renderer: triangle rasterization (depth test, texturing) on the GPU.
 //! Platform-agnostic: frontends create the `wgpu::Instance` + `Surface`
 //! (canvas on wasm, window on native) and pass them in.
+//!
+//! Textures are uploaded once; meshes are re-packed into vertex buffers every
+//! frame, so the scene can change at runtime (doors, enemies, the player view).
 
 use crate::math::Mat4;
 use crate::obj::{Mesh, Texture, Tri};
@@ -10,7 +12,8 @@ use std::collections::HashMap;
 pub type SurfaceFactory = Box<dyn Fn(&wgpu::Instance) -> Result<wgpu::Surface<'static>, String>>;
 
 const STRIDE: u64 = 32; // pos3 + uv2 + color3
-const SKY: [f32; 3] = [232.0 / 255.0, 200.0 / 255.0, 156.0 / 255.0];
+const HUD_STRIDE: u64 = 20; // pos2 + color3
+const SKY: [f32; 3] = [0.015, 0.015, 0.02]; // dark maze clear color
 
 const SHADER: &str = r#"
 struct Uniforms {
@@ -44,6 +47,27 @@ struct VSOut {
 }
 "#;
 
+// Screen-space overlay: vertices are already in NDC, no depth, no texture.
+const HUD_SHADER: &str = r#"
+struct HudIn {
+  @location(0) pos: vec2<f32>,
+  @location(1) color: vec3<f32>,
+};
+struct HudOut {
+  @builtin(position) clip: vec4<f32>,
+  @location(0) color: vec3<f32>,
+};
+@vertex fn vs(in: HudIn) -> HudOut {
+  var out: HudOut;
+  out.clip = vec4<f32>(in.pos, 0.0, 1.0);
+  out.color = in.color;
+  return out;
+}
+@fragment fn fs(in: HudOut) -> @location(0) vec4<f32> {
+  return vec4<f32>(in.color, 1.0);
+}
+"#;
+
 #[repr(C)]
 #[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
 struct Vtx {
@@ -52,10 +76,25 @@ struct Vtx {
     color: [f32; 3],
 }
 
+#[repr(C)]
+#[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
+struct HudVtx {
+    pos: [f32; 2],
+    color: [f32; 3],
+}
+
 struct Group {
     buffer: wgpu::Buffer,
     count: u32,
     bind_group: wgpu::BindGroup,
+}
+
+/// Screen overlay state produced by the game each frame.
+pub struct Hud {
+    pub health: f32, // 0..1
+    pub ammo: f32,   // 0..1
+    pub weapon: u32, // active weapon index
+    pub muzzle: f32, // flash intensity 0..1
 }
 
 pub struct Renderer {
@@ -66,10 +105,14 @@ pub struct Renderer {
     surface: wgpu::Surface<'static>,
     config: wgpu::SurfaceConfiguration,
     pipeline: wgpu::RenderPipeline,
+    hud_pipeline: wgpu::RenderPipeline,
+    layout: wgpu::BindGroupLayout,
+    sampler: wgpu::Sampler,
     uniform: wgpu::Buffer,
     depth: wgpu::Texture,
     off: wgpu::Texture,
     readbuf: wgpu::Buffer,
+    gpu_textures: Vec<wgpu::Texture>,
     groups: Vec<Group>,
     view_proj: Mat4,
 }
@@ -81,7 +124,6 @@ impl Renderer {
         w: u32,
         h: u32,
         textures: &[Texture],
-        meshes: &[Mesh],
     ) -> Result<Renderer, String> {
         let instance = wgpu::Instance::default();
         let surface = create_surface(&instance)?;
@@ -127,11 +169,17 @@ impl Renderer {
             desired_maximum_frame_latency: 4,
         };
         surface.configure(&device, &config);
+
         let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: None,
             source: wgpu::ShaderSource::Wgsl(SHADER.into()),
         });
-        let bind_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+        let hud_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: None,
+            source: wgpu::ShaderSource::Wgsl(HUD_SHADER.into()),
+        });
+
+        let layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: None,
             entries: &[
                 wgpu::BindGroupLayoutEntry {
@@ -164,7 +212,7 @@ impl Renderer {
         });
         let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: None,
-            bind_group_layouts: &[Some(&bind_layout)],
+            bind_group_layouts: &[Some(&layout)],
             immediate_size: 0,
         });
         let pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
@@ -210,6 +258,44 @@ impl Renderer {
             multiview_mask: None,
             cache: None,
         });
+        // HUD: no bind group, no depth, no culling, no blend (opaque quads).
+        let hud_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: None,
+            layout: None,
+            vertex: wgpu::VertexState {
+                module: &hud_shader,
+                entry_point: Some("vs"),
+                compilation_options: Default::default(),
+                buffers: &[Some(wgpu::VertexBufferLayout {
+                    array_stride: HUD_STRIDE,
+                    step_mode: wgpu::VertexStepMode::Vertex,
+                    attributes: &[
+                        wgpu::VertexAttribute { format: wgpu::VertexFormat::Float32x2, offset: 0, shader_location: 0 },
+                        wgpu::VertexAttribute { format: wgpu::VertexFormat::Float32x3, offset: 8, shader_location: 1 },
+                    ],
+                })],
+            },
+            primitive: wgpu::PrimitiveState {
+                topology: wgpu::PrimitiveTopology::TriangleList,
+                cull_mode: None,
+                ..Default::default()
+            },
+            depth_stencil: None,
+            multisample: Default::default(),
+            fragment: Some(wgpu::FragmentState {
+                module: &hud_shader,
+                entry_point: Some("fs"),
+                compilation_options: Default::default(),
+                targets: &[Some(wgpu::ColorTargetState {
+                    format,
+                    blend: None,
+                    write_mask: wgpu::ColorWrites::ALL,
+                })],
+            }),
+            multiview_mask: None,
+            cache: None,
+        });
+
         let sampler = device.create_sampler(&wgpu::SamplerDescriptor {
             mag_filter: wgpu::FilterMode::Linear,
             min_filter: wgpu::FilterMode::Linear,
@@ -224,7 +310,12 @@ impl Renderer {
             mapped_at_creation: false,
         });
         let (depth, off, readbuf) = create_frame_resources(&device, w, h, format);
-        let groups = build_groups(&device, &queue, textures, meshes, &bind_layout, &sampler, &uniform);
+
+        let mut gpu_textures: Vec<wgpu::Texture> = textures
+            .iter()
+            .map(|t| upload_texture(&device, &queue, t))
+            .collect();
+        gpu_textures.push(make_white(&device, &queue));
 
         Ok(Renderer {
             instance,
@@ -234,15 +325,21 @@ impl Renderer {
             surface,
             config,
             pipeline,
+            hud_pipeline,
+            layout,
+            sampler,
             uniform,
             depth,
             off,
             readbuf,
-            groups,
+            gpu_textures,
+            groups: Vec::new(),
             view_proj: Mat4([0.0; 16]),
         })
     }
 
+    /// Reconfigure the surface and all size-dependent GPU resources.
+    /// Zero-sized windows are ignored until the platform reports a usable size.
     pub fn resize(&mut self, width: u32, height: u32) -> bool {
         if width == 0 || height == 0 || (width == self.config.width && height == self.config.height) {
             return false;
@@ -254,18 +351,53 @@ impl Renderer {
         true
     }
 
-    pub fn render(&mut self, view_proj: &Mat4) {
+    /// Draw one frame: scene, then HUD overlay, to the surface.
+    pub fn render(&mut self, view_proj: &Mat4, meshes: &[Mesh], hud: &Hud) {
         self.view_proj = *view_proj;
         self.queue.write_buffer(&self.uniform, 0, bytemuck::cast_slice(&[view_proj.0]));
+        self.rebuild_groups(meshes);
         let Some((frame, reconfigure)) = self.acquire_frame() else { return };
         let view = frame.texture.create_view(&Default::default());
         let mut enc = self.device.create_command_encoder(&Default::default());
-        self.draw(&mut enc, &view);
+        self.draw_scene(&mut enc, &view);
+        self.draw_hud(&mut enc, &view, hud);
         self.queue.submit([enc.finish()]);
         self.queue.present(frame);
         if reconfigure {
             self.surface.configure(&self.device, &self.config);
         }
+    }
+
+    /// Render the current camera into the offscreen target and read it back
+    /// as tightly packed RGBA bytes (verification; HUD excluded).
+    pub async fn read_frame(&mut self, meshes: &[Mesh]) -> Result<Vec<u8>, String> {
+        self.queue.write_buffer(&self.uniform, 0, bytemuck::cast_slice(&[self.view_proj.0]));
+        self.rebuild_groups(meshes);
+        let off_view = self.off.create_view(&Default::default());
+        let mut enc = self.device.create_command_encoder(&Default::default());
+        self.draw_scene(&mut enc, &off_view);
+        enc.copy_texture_to_buffer(
+            wgpu::TexelCopyTextureInfo { texture: &self.off, mip_level: 0, origin: wgpu::Origin3d::ZERO, aspect: wgpu::TextureAspect::All },
+            wgpu::TexelCopyBufferInfo {
+                buffer: &self.readbuf,
+                layout: wgpu::TexelCopyBufferLayout { offset: 0, bytes_per_row: Some(padded_row_bytes(self.config.width)), rows_per_image: None },
+            },
+            wgpu::Extent3d { width: self.config.width, height: self.config.height, depth_or_array_layers: 1 },
+        );
+        self.queue.submit([enc.finish()]);
+        self.map_readbuf().await
+    }
+
+    fn rebuild_groups(&mut self, meshes: &[Mesh]) {
+        self.groups = build_groups(
+            &self.device,
+            &self.queue,
+            meshes,
+            &self.gpu_textures,
+            &self.layout,
+            &self.sampler,
+            &self.uniform,
+        );
     }
 
     fn acquire_frame(&mut self) -> Option<(wgpu::SurfaceTexture, bool)> {
@@ -297,55 +429,7 @@ impl Renderer {
         Ok(())
     }
 
-
-    /// Render the current camera into the offscreen target and read it back
-    /// as tightly packed RGBA bytes (used for numeric verification).
-    pub async fn read_frame(&mut self) -> Result<Vec<u8>, String> {
-        self.queue.write_buffer(&self.uniform, 0, bytemuck::cast_slice(&[self.view_proj.0]));
-        let off_view = self.off.create_view(&Default::default());
-        let mut enc = self.device.create_command_encoder(&Default::default());
-        self.draw(&mut enc, &off_view);
-        self.queue.submit([enc.finish()]);
-
-        let mut enc = self.device.create_command_encoder(&Default::default());
-        enc.copy_texture_to_buffer(
-            wgpu::TexelCopyTextureInfo { texture: &self.off, mip_level: 0, origin: wgpu::Origin3d::ZERO, aspect: wgpu::TextureAspect::All },
-            wgpu::TexelCopyBufferInfo {
-                buffer: &self.readbuf,
-                layout: wgpu::TexelCopyBufferLayout { offset: 0, bytes_per_row: Some(padded_row_bytes(self.config.width)), rows_per_image: None },
-            },
-            wgpu::Extent3d { width: self.config.width, height: self.config.height, depth_or_array_layers: 1 },
-        );
-        self.queue.submit([enc.finish()]);
-        self.map_readbuf().await
-    }
-
-    async fn map_readbuf(&mut self) -> Result<Vec<u8>, String> {
-        let (tx, rx) = futures_channel::oneshot::channel();
-        let data = {
-            let slice = self.readbuf.slice(..);
-            slice.map_async(wgpu::MapMode::Read, move |res| {
-                let _ = tx.send(res);
-            });
-            let _ = self.device.poll(wgpu::PollType::wait_indefinitely());
-            match rx.await {
-                Ok(Ok(())) => {}
-                _ => return Err(String::from("buffer map failed")),
-            }
-            slice.get_mapped_range().map_err(|e| format!("map range: {e:?}"))?.to_vec()
-        };
-        self.readbuf.unmap();
-        let mut data = unpack_rows(&data, self.config.width, self.config.height, padded_row_bytes(self.config.width));
-        if matches!(self.config.format, wgpu::TextureFormat::Bgra8Unorm | wgpu::TextureFormat::Bgra8UnormSrgb) {
-            for px in data.chunks_exact_mut(4) {
-                px.swap(0, 2);
-            }
-        }
-        Ok(data)
-    }
-
-    /// Record the scene pass (sky clear + all draw groups) into `enc`.
-    fn draw(&self, enc: &mut wgpu::CommandEncoder, target: &wgpu::TextureView) {
+    fn draw_scene(&self, enc: &mut wgpu::CommandEncoder, target: &wgpu::TextureView) {
         let mut pass = enc.begin_render_pass(&wgpu::RenderPassDescriptor {
             label: None,
             color_attachments: &[Some(wgpu::RenderPassColorAttachment {
@@ -372,6 +456,63 @@ impl Renderer {
             pass.set_vertex_buffer(0, g.buffer.slice(..));
             pass.draw(0..g.count, 0..1);
         }
+    }
+
+    fn draw_hud(&self, enc: &mut wgpu::CommandEncoder, target: &wgpu::TextureView, hud: &Hud) {
+        let quads = hud_quads(hud);
+        if quads.is_empty() {
+            return;
+        }
+        let buffer = self.device.create_buffer(&wgpu::BufferDescriptor {
+            label: None,
+            size: (quads.len() * std::mem::size_of::<HudVtx>()) as u64,
+            usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+        self.queue.write_buffer(&buffer, 0, bytemuck::cast_slice(&quads));
+        let mut pass = enc.begin_render_pass(&wgpu::RenderPassDescriptor {
+            label: None,
+            color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                view: target,
+                depth_slice: None,
+                resolve_target: None,
+                ops: wgpu::Operations {
+                    load: wgpu::LoadOp::Load,
+                    store: wgpu::StoreOp::Store,
+                },
+            })],
+            depth_stencil_attachment: None,
+            timestamp_writes: None,
+            occlusion_query_set: None,
+            multiview_mask: None,
+        });
+        pass.set_pipeline(&self.hud_pipeline);
+        pass.set_vertex_buffer(0, buffer.slice(..));
+        pass.draw(0..quads.len() as u32, 0..1);
+    }
+
+    async fn map_readbuf(&mut self) -> Result<Vec<u8>, String> {
+        let (tx, rx) = futures_channel::oneshot::channel();
+        let data = {
+            let slice = self.readbuf.slice(..);
+            slice.map_async(wgpu::MapMode::Read, move |res| {
+                let _ = tx.send(res);
+            });
+            let _ = self.device.poll(wgpu::PollType::wait_indefinitely());
+            match rx.await {
+                Ok(Ok(())) => {}
+                _ => return Err(String::from("buffer map failed")),
+            }
+            slice.get_mapped_range().map_err(|e| format!("map range: {e:?}"))?.to_vec()
+        };
+        self.readbuf.unmap();
+        let mut data = unpack_rows(&data, self.config.width, self.config.height, padded_row_bytes(self.config.width));
+        if matches!(self.config.format, wgpu::TextureFormat::Bgra8Unorm | wgpu::TextureFormat::Bgra8UnormSrgb) {
+            for px in data.chunks_exact_mut(4) {
+                px.swap(0, 2);
+            }
+        }
+        Ok(data)
     }
 
     /// Surface dimensions in physical pixels.
@@ -428,13 +569,10 @@ fn upload_texture(device: &wgpu::Device, queue: &wgpu::Queue, tex: &Texture) -> 
     if padded == row_bytes {
         write_tex(queue, &gpu, &tex.data, padded, tex.h);
     } else {
-        // Padded rows start zeroed; copy only each row's real bytes (JS
-        // subarray().set() clamps the same way).
         let mut buf = vec![0u8; (padded * tex.h) as usize];
         for y in 0..tex.h as usize {
             let (start, dstart) = (y * padded as usize, y * row_bytes as usize);
-            buf[start..start + row_bytes as usize]
-                .copy_from_slice(&tex.data[dstart..dstart + row_bytes as usize]);
+            buf[start..start + row_bytes as usize].copy_from_slice(&tex.data[dstart..dstart + row_bytes as usize]);
         }
         write_tex(queue, &gpu, &buf, padded, tex.h);
     }
@@ -461,22 +599,18 @@ fn make_white(device: &wgpu::Device, queue: &wgpu::Queue) -> wgpu::Texture {
     gpu
 }
 
-/// Upload textures and pack meshes into per-texture vertex buffers + bind
-/// groups. Flat-color triangles share a 1x1 white texture; their shade is
-/// carried by the vertex color.
+/// Pack meshes into per-texture vertex buffers + bind groups. Flat-color
+/// triangles share a 1x1 white texture (index `gpu_textures.len() - 1`).
 fn build_groups(
     device: &wgpu::Device,
     queue: &wgpu::Queue,
-    textures: &[Texture],
     meshes: &[Mesh],
+    gpu_textures: &[wgpu::Texture],
     layout: &wgpu::BindGroupLayout,
     sampler: &wgpu::Sampler,
     uniform: &wgpu::Buffer,
 ) -> Vec<Group> {
-    let mut gpu_textures: Vec<wgpu::Texture> = textures.iter().map(|t| upload_texture(device, queue, t)).collect();
-    gpu_textures.push(make_white(device, queue));
     let white_idx = (gpu_textures.len() - 1) as u32;
-
     let mut by_tex: HashMap<u32, Vec<&Tri>> = HashMap::new();
     for mesh in meshes {
         for tri in &mesh.tris {
@@ -523,6 +657,39 @@ fn build_groups(
     groups
 }
 
+/// Build the screen-space overlay: crosshair, health/ammo bars, weapon pips.
+fn hud_quads(hud: &Hud) -> Vec<HudVtx> {
+    let mut v = Vec::new();
+    let cross = [
+        0.4 + 0.6 * hud.muzzle,
+        1.0,
+        0.3 + 0.7 * hud.muzzle,
+    ];
+    // crosshair
+    push_quad(&mut v, -0.018, -0.002, 0.018, 0.002, cross);
+    push_quad(&mut v, -0.002, -0.018, 0.002, 0.018, cross);
+    // health bar (bottom-left)
+    push_quad(&mut v, -0.95, -0.97, -0.55, -0.93, [0.15, 0.15, 0.15]);
+    push_quad(&mut v, -0.945, -0.965, -0.945 + 0.4 * hud.health, -0.935, [0.9, 0.1, 0.1]);
+    // ammo bar
+    push_quad(&mut v, -0.45, -0.97, -0.05, -0.93, [0.15, 0.15, 0.15]);
+    push_quad(&mut v, -0.445, -0.965, -0.445 + 0.4 * hud.ammo, -0.935, [0.9, 0.7, 0.1]);
+    // weapon pips (bottom-right)
+    for i in 0..3 {
+        let lit = i as u32 == hud.weapon;
+        let color = if lit { [0.9, 0.9, 0.9] } else { [0.2, 0.2, 0.2] };
+        push_quad(&mut v, 0.6 + 0.12 * i as f32, -0.97, 0.6 + 0.12 * i as f32 + 0.1, -0.93, color);
+    }
+    v
+}
+
+fn push_quad(v: &mut Vec<HudVtx>, x0: f32, y0: f32, x1: f32, y1: f32, color: [f32; 3]) {
+    let a = HudVtx { pos: [x0, y0], color };
+    let b = HudVtx { pos: [x1, y0], color };
+    let c = HudVtx { pos: [x1, y1], color };
+    let d = HudVtx { pos: [x0, y1], color };
+    v.extend_from_slice(&[a, b, c, a, c, d]);
+}
 
 #[cfg(test)]
 mod tests {
