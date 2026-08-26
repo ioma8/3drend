@@ -1,48 +1,42 @@
 # 3drend
 
-A small software 3D engine that renders a textured world in the browser using **vector polygon rendering** — no raycasting, no raytracing.
+A 3D engine built on the vector/polygon-projection method — project polygon
+vertices, rasterize triangles, depth-test per pixel. No raycasting, no
+raytracing.
 
-## How it renders
+This branch renders with WebGPU through the **wgpu crate**, compiled to WASM
+with wasm-bindgen. All world building, OBJ/MTL parsing, camera math, and
+rendering live in Rust (`src/`); a thin JS glue (`public/js/main.js`) handles
+asset I/O, image decode, input, and the frame loop.
 
-The same method the project has used from the start, extended to full 3D:
+## Build
 
-1. Every object is a mesh of textured triangles (polygons).
-2. Triangle vertices are transformed into camera space and perspective-projected.
-3. Faces are backface-culled and clipped against the near plane.
-4. Polygons are depth-ordered (painter's algorithm) and rasterized scanline-by-scanline into a per-pixel z-buffer with perspective-correct textures.
+Requires Rust with the `wasm32-unknown-unknown` target and wasm-pack:
 
-No rays are cast, no lights are traced — geometry is projected and filled, exactly like the original wall renderer, just for arbitrary 3D polygons.
-
-## Controls
-
-| Key | Action |
-| --- | --- |
-| `W` / `S` | move forward / back |
-| `A` / `D` | strafe |
-| `←` / `→` | turn |
-| `↑` / `↓` | look up / down |
+```sh
+rustup target add wasm32-unknown-unknown
+cargo binstall wasm-pack   # or: cargo install wasm-pack
+./build.sh                 # wasm-pack build --target web --release --out-dir public/pkg
+```
 
 ## Run
 
 ```sh
-npm install
-npm start        # http://localhost:3000
+node serve.mjs             # static server on http://localhost:3000 (public/)
 ```
 
-Other scripts: `npm run build` (production build), `npm run lint`, `npm test`.
+Open http://localhost:3000. Controls: WASD move, arrow keys turn/pitch.
 
-## The world
+## Test
 
-A 200×200 map with a downloaded world-map texture as the ground, rolling grass hills, five buildings (pyramid and flat roofs), and downloaded OBJ models placed around town: a low-poly tree, a spider, a character statue, and a 68k-face backpack on a pedestal in the square.
+`cargo test` runs the native unit tests (matrix math pinned to values
+verified against the previous renderers, OBJ/MTL parsing, world structure).
 
-## Structure
+## Layout
 
-- `src/engine3d.ts` — the engine: camera transform, projection, near-plane clipping, painter sort, z-buffered scanline rasterizer, OBJ/MTL loader.
-- `src/world.ts` — world assembly: ground, hills, buildings, model placement.
-- `src/App.tsx` — canvas, input, render loop, minimap.
-- `public/models/` — downloaded OBJ models and their textures.
-- `public/textures/` — ground, wall, roof, and tree textures.
-
-## Assets
-
-Models: `tree.obj` (three.js repo), `spider.obj` + textures (assimp test suite), `WusonOBJ.obj` (assimp test suite), `backpack.obj` + `diffuse.jpg` (LearnOpenGL). World map: NASA-style `land_ocean_ice_cloud_2048.jpg` (three.js examples); `grasslight-big.jpg` (three.js examples).
+- `src/math.rs` — column-major 4x4 matrix math (exact port of the engine's camera math)
+- `src/obj.rs` — OBJ + MTL parser and asset types
+- `src/world.rs` — scene assembly: ground, terrain, buildings, downloaded models
+- `src/renderer.rs` — wgpu renderer: pipeline, per-texture draw groups, readback
+- `src/lib.rs` — wasm entry: app state, camera, input, frame loop
+- `public/` — static web root: page, JS glue, models, textures, `pkg/` (build output)
