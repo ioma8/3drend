@@ -142,7 +142,7 @@ impl App {
         let world = build_world(&mut textures, mk(tree), mk(spider), mk(wuson), mk(backpack));
 
         let (instance, surface) = make_instance_surface(canvas).map_err(|e| JsValue::from_str(&e))?;
-        let renderer = Renderer::new(instance, surface, VIEW_W, VIEW_H, &textures, &world.meshes)
+        let renderer = Renderer::new(instance, surface, wgpu::PresentMode::Fifo, VIEW_W, VIEW_H, &textures, &world.meshes)
             .await
             .map_err(|e| JsValue::from_str(&e))?;
         Ok(App::from_parts(renderer, world))

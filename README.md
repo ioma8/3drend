@@ -24,11 +24,12 @@ cargo binstall wasm-pack   # or: cargo install wasm-pack
 The same core, compiled to a native desktop app:
 
 ```sh
-cargo run --features native                  # opens a window
+cargo run --features native                  # opens a window (vsync'd)
+cargo run --features native -- --uncapped    # PresentMode::Immediate, prints fps
 cargo run --features native -- --frames 60 --dump frame.rgba   # verify: render 60 frames, dump raw RGBA, exit
 ```
 
-`DREND_ASSETS` overrides the asset directory (default `./public`). Controls are the same; the numeric output matches the browser build pixel-for-pixel.
+`DREND_ASSETS` overrides the asset directory (default `./public`). Controls are the same; the numeric output matches the browser build pixel-for-pixel. Rendering cost is ~1 ms/frame; vsync and the compositor, not the engine, cap the visible rate.
 
 ## Test
 

@@ -76,6 +76,7 @@ impl Renderer {
     pub async fn new(
         instance: wgpu::Instance,
         surface: wgpu::Surface<'static>,
+        present_mode: wgpu::PresentMode,
         w: u32,
         h: u32,
         textures: &[Texture],
@@ -114,10 +115,10 @@ impl Renderer {
             format,
             width: w,
             height: h,
-            present_mode: wgpu::PresentMode::Fifo,
+            present_mode,
             alpha_mode: wgpu::CompositeAlphaMode::Auto,
             view_formats: vec![],
-            desired_maximum_frame_latency: 2,
+            desired_maximum_frame_latency: 4,
         };
         surface.configure(&device, &config);
         let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {

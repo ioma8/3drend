@@ -25,17 +25,19 @@ const VIEW_H: u32 = 360;
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut max_frames = None;
     let mut dump = None;
+    let mut uncapped = false;
     let mut args = std::env::args().skip(1);
     while let Some(a) = args.next() {
         match a.as_str() {
             "--frames" => max_frames = args.next().and_then(|s| s.parse().ok()),
             "--dump" => dump = args.next().map(PathBuf::from),
+            "--uncapped" => uncapped = true,
             _ => eprintln!("unknown argument: {a}"),
         }
     }
 
     let event_loop = EventLoop::new()?;
-    let mut frontend = Frontend { window: None, app: None, last: None, frames: 0, max_frames, dump };
+    let mut frontend = Frontend { window: None, app: None, last: None, fps_clock: Instant::now(), fps_count: 0, frames: 0, max_frames, dump, uncapped };
     event_loop.run_app(&mut frontend)?;
     Ok(())
 }
@@ -44,9 +46,12 @@ struct Frontend {
     window: Option<Arc<Window>>,
     app: Option<App>,
     last: Option<Instant>,
+    fps_clock: Instant,
+    fps_count: u32,
     frames: u32,
     max_frames: Option<u32>,
     dump: Option<PathBuf>,
+    uncapped: bool,
 }
 
 impl Frontend {
@@ -66,11 +71,12 @@ impl Frontend {
 
         let instance = wgpu::Instance::new(&wgpu::InstanceDescriptor::default());
         let surface = instance.create_surface(window.clone()).map_err(|e| e.to_string())?;
-        let renderer = pollster::block_on(Renderer::new(instance, surface, VIEW_W, VIEW_H, &textures, &world.meshes))?;
+        let present = if self.uncapped { wgpu::PresentMode::Immediate } else { wgpu::PresentMode::Fifo };
+        let renderer = pollster::block_on(Renderer::new(instance, surface, present, VIEW_W, VIEW_H, &textures, &world.meshes))?;
         self.app = Some(App::from_parts(renderer, world));
         self.last = Some(Instant::now());
         self.window = Some(window);
-        eprintln!("3drend: window ready");
+        eprintln!("3drend: window ready (present: {present:?})");
         Ok(())
     }
 
@@ -82,6 +88,12 @@ impl Frontend {
         app.tick(dt);
 
         self.frames += 1;
+        self.fps_count += 1;
+        if self.fps_clock.elapsed().as_secs_f32() >= 1.0 {
+            eprintln!("fps: {}", self.fps_count);
+            self.fps_clock = Instant::now();
+            self.fps_count = 0;
+        }
         if let Some(max) = self.max_frames {
             if self.frames >= max {
                 if let Some(path) = &self.dump {
