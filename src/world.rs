@@ -168,6 +168,27 @@ pub fn transform_mesh(mesh: &mut Mesh, sx: f32, sy: f32, sz: f32, rot_y: f32, tx
     }
 }
 
+/// Fixed light direction (normalized) for flat shading.
+const LIGHT: [f32; 3] = [-0.4, 0.8, 0.35];
+
+/// Clone a model mesh, place it in the world, shade it, and record a marker.
+fn place_model(
+    meshes: &mut Vec<Mesh>,
+    markers: &mut Vec<Marker>,
+    src: &Mesh,
+    scale: [f32; 3],
+    rot_y: f32,
+    pos: [f32; 3],
+    label: &str,
+) {
+    let mut m = src.clone();
+    transform_mesh(&mut m, scale[0], scale[1], scale[2], rot_y, pos[0], pos[1], pos[2]);
+    shade_mesh(&mut m, LIGHT[0], LIGHT[1], LIGHT[2]);
+    meshes.push(m);
+    markers.push(Marker { x: pos[0], z: pos[2], label: label.to_string() });
+}
+
+
 /// Assemble the fixed scene. Texture indices: 0 worldmap, 1 grasslight,
 /// 2 wall1, 3 wall2, 4 roof, 5 tree (the order the JS glue uploads them).
 /// Models are loaded in the same order the TS engine loaded them so texture
@@ -190,7 +211,7 @@ pub fn build_world(
     // grass hills from the heightfield map (north-west area)
     let mut hill = Mesh::default();
     terrain(&mut hill, 1, -80.0, 80.0, 70.0, 12, 6.0, 7);
-    shade_mesh(&mut hill, -0.4, 0.8, 0.35);
+    shade_mesh(&mut hill, LIGHT[0], LIGHT[1], LIGHT[2]);
     meshes.push(hill);
 
     // buildings: cx, cz, w, h, d, sideTex, roofTex, pyramid
@@ -217,35 +238,17 @@ pub fn build_world(
     let backpack_mesh = load_obj(&backpack.obj_text, backpack.mtl_text.as_deref(), backpack.images, textures, backpack.fallback);
 
     for (tx, tz, rot) in [(-10.0, 10.0, 0.5f32), (30.0, -30.0, 2.2), (-35.0, -15.0, 4.1), (10.0, -50.0, 1.2)] {
-        let mut m = tree_mesh.clone();
-        transform_mesh(&mut m, 7.0, 7.0, 7.0, rot, tx, 0.0, tz);
-        shade_mesh(&mut m, -0.4, 0.8, 0.35);
-        meshes.push(m);
-        markers.push(Marker { x: tx, z: tz, label: String::from("tree") });
+        place_model(&mut meshes, &mut markers, &tree_mesh, [7.0; 3], rot, [tx, 0.0, tz], "tree");
     }
-
-    let mut sp = spider_mesh.clone();
-    transform_mesh(&mut sp, 0.1, 0.1, 0.1, 0.8, 15.0, 0.0, 5.0);
-    shade_mesh(&mut sp, -0.4, 0.8, 0.35);
-    meshes.push(sp);
-    markers.push(Marker { x: 15.0, z: 5.0, label: String::from("spider") });
-
-    let mut wu = wuson_mesh.clone();
-    transform_mesh(&mut wu, 6.6, 6.6, 6.6, 2.356, -25.0, 0.0, 25.0);
-    shade_mesh(&mut wu, -0.4, 0.8, 0.35);
-    meshes.push(wu);
-    markers.push(Marker { x: -25.0, z: 25.0, label: String::from("wuson") });
+    place_model(&mut meshes, &mut markers, &spider_mesh, [0.1; 3], 0.8, [15.0, 0.0, 5.0], "spider");
+    place_model(&mut meshes, &mut markers, &wuson_mesh, [6.6; 3], 2.356, [-25.0, 0.0, 25.0], "wuson");
 
     // the complex downloaded model, displayed on a pedestal in the square
     let mut ped = Mesh::default();
     box_mesh(&mut ped, 0.0, 0.0, 6.0, 1.2, 6.0, 3, 4);
-    shade_mesh(&mut ped, -0.4, 0.8, 0.35);
+    shade_mesh(&mut ped, LIGHT[0], LIGHT[1], LIGHT[2]);
     meshes.push(ped);
-    let mut bp = backpack_mesh.clone();
-    transform_mesh(&mut bp, 3.0, 3.0, 3.0, 0.6, 0.0, 1.2, 0.0);
-    shade_mesh(&mut bp, -0.4, 0.8, 0.35);
-    meshes.push(bp);
-    markers.push(Marker { x: 0.0, z: 0.0, label: String::from("backpack") });
+    place_model(&mut meshes, &mut markers, &backpack_mesh, [3.0; 3], 0.6, [0.0, 1.2, 0.0], "backpack");
 
     World { meshes, footprints, markers }
 }

@@ -224,59 +224,7 @@ impl Renderer {
             mapped_at_creation: false,
         });
         let (depth, off, readbuf) = create_frame_resources(&device, w, h, format);
- 
-         // GPU copies of all textures; flat-color triangles share a 1x1 white
-         // texture with the shade carried by the vertex color.
-         let mut gpu_textures: Vec<wgpu::Texture> = textures.iter().map(|t| upload_texture(&device, &queue, t)).collect();
-        gpu_textures.push(make_white(&device, &queue));
-        let white_idx = (gpu_textures.len() - 1) as u32;
-
-        let mut by_tex: HashMap<u32, Vec<&Tri>> = HashMap::new();
-        for mesh in meshes {
-            for tri in &mesh.tris {
-                let key = if tri.tex >= 0 { tri.tex as u32 } else { white_idx };
-                by_tex.entry(key).or_default().push(tri);
-            }
-        }
-        let mut groups = Vec::new();
-        for (tex_idx, tris) in by_tex {
-            let flat = tex_idx == white_idx;
-            let mut verts: Vec<Vtx> = Vec::with_capacity(tris.len() * 3);
-            for tri in &tris {
-                for v in [&tri.a, &tri.b, &tri.c] {
-                    let (cr, cg, cb) = if flat {
-                        let c = tri.color;
-                        let s = tri.shade;
-                        (
-                            ((c >> 16) & 255) as f32 / 255.0 * s,
-                            ((c >> 8) & 255) as f32 / 255.0 * s,
-                            (c & 255) as f32 / 255.0 * s,
-                        )
-                    } else {
-                        (tri.shade, tri.shade, tri.shade)
-                    };
-                    verts.push(Vtx { pos: [v.x, v.y, v.z], uv: [v.u, v.v], color: [cr, cg, cb] });
-                }
-            }
-            let buffer = device.create_buffer(&wgpu::BufferDescriptor {
-                label: None,
-                size: (verts.len() * std::mem::size_of::<Vtx>()) as u64,
-                usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
-                mapped_at_creation: false,
-            });
-            queue.write_buffer(&buffer, 0, bytemuck::cast_slice(&verts));
-            let view = gpu_textures[tex_idx as usize].create_view(&Default::default());
-            let bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
-                label: None,
-                layout: &bind_layout,
-                entries: &[
-                    wgpu::BindGroupEntry { binding: 0, resource: uniform.as_entire_binding() },
-                    wgpu::BindGroupEntry { binding: 1, resource: wgpu::BindingResource::TextureView(&view) },
-                    wgpu::BindGroupEntry { binding: 2, resource: wgpu::BindingResource::Sampler(&sampler) },
-                ],
-            });
-            groups.push(Group { buffer, count: (tris.len() * 3) as u32, bind_group });
-        }
+        let groups = build_groups(&device, &queue, textures, meshes, &bind_layout, &sampler, &uniform);
 
         Ok(Renderer {
             instance,
@@ -512,6 +460,69 @@ fn make_white(device: &wgpu::Device, queue: &wgpu::Queue) -> wgpu::Texture {
     );
     gpu
 }
+
+/// Upload textures and pack meshes into per-texture vertex buffers + bind
+/// groups. Flat-color triangles share a 1x1 white texture; their shade is
+/// carried by the vertex color.
+fn build_groups(
+    device: &wgpu::Device,
+    queue: &wgpu::Queue,
+    textures: &[Texture],
+    meshes: &[Mesh],
+    layout: &wgpu::BindGroupLayout,
+    sampler: &wgpu::Sampler,
+    uniform: &wgpu::Buffer,
+) -> Vec<Group> {
+    let mut gpu_textures: Vec<wgpu::Texture> = textures.iter().map(|t| upload_texture(device, queue, t)).collect();
+    gpu_textures.push(make_white(device, queue));
+    let white_idx = (gpu_textures.len() - 1) as u32;
+
+    let mut by_tex: HashMap<u32, Vec<&Tri>> = HashMap::new();
+    for mesh in meshes {
+        for tri in &mesh.tris {
+            let key = if tri.tex >= 0 { tri.tex as u32 } else { white_idx };
+            by_tex.entry(key).or_default().push(tri);
+        }
+    }
+
+    let mut groups = Vec::new();
+    for (tex_idx, tris) in by_tex {
+        let flat = tex_idx == white_idx;
+        let mut verts: Vec<Vtx> = Vec::with_capacity(tris.len() * 3);
+        for tri in &tris {
+            for v in [&tri.a, &tri.b, &tri.c] {
+                let (cr, cg, cb) = if flat {
+                    let c = tri.color;
+                    let s = tri.shade;
+                    (((c >> 16) & 255) as f32 / 255.0 * s, ((c >> 8) & 255) as f32 / 255.0 * s, (c & 255) as f32 / 255.0 * s)
+                } else {
+                    (tri.shade, tri.shade, tri.shade)
+                };
+                verts.push(Vtx { pos: [v.x, v.y, v.z], uv: [v.u, v.v], color: [cr, cg, cb] });
+            }
+        }
+        let buffer = device.create_buffer(&wgpu::BufferDescriptor {
+            label: None,
+            size: (verts.len() * std::mem::size_of::<Vtx>()) as u64,
+            usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+        queue.write_buffer(&buffer, 0, bytemuck::cast_slice(&verts));
+        let view = gpu_textures[tex_idx as usize].create_view(&Default::default());
+        let bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: None,
+            layout,
+            entries: &[
+                wgpu::BindGroupEntry { binding: 0, resource: uniform.as_entire_binding() },
+                wgpu::BindGroupEntry { binding: 1, resource: wgpu::BindingResource::TextureView(&view) },
+                wgpu::BindGroupEntry { binding: 2, resource: wgpu::BindingResource::Sampler(sampler) },
+            ],
+        });
+        groups.push(Group { buffer, count: (tris.len() * 3) as u32, bind_group });
+    }
+    groups
+}
+
 
 #[cfg(test)]
 mod tests {

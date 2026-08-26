@@ -61,38 +61,10 @@ pub fn load_obj(
     textures: &mut Vec<Texture>,
     fallback_tex: i32,
 ) -> Mesh {
-    let mut materials: HashMap<String, ObjMaterial> = HashMap::new();
-    if let Some(mtl) = mtl_text {
-        let mut name = String::new();
-        let mut tex: i32 = -1;
-        let mut color: u32 = 0x9c9c9c;
-        for line in mtl.lines() {
-            let s = line.trim();
-            if let Some(rest) = s.strip_prefix("newmtl ") {
-                if !name.is_empty() {
-                    materials.insert(name.clone(), ObjMaterial { tex, color });
-                }
-                name = rest.trim().to_string();
-                tex = -1;
-                color = 0x9c9c9c;
-            } else if let Some(file) = s.strip_prefix("map_Kd ") {
-                tex = find_texture(file.trim(), &mut images, textures);
-            } else if let Some(rest) = s.strip_prefix("Kd ") {
-                let p: Vec<f32> = rest.split_whitespace().filter_map(|t| t.parse().ok()).collect();
-                if p.len() >= 3 {
-                    color = (p[0] * 255.0).round() as u32 * 0x10000
-                        | (p[1] * 255.0).round() as u32 * 0x100
-                        | (p[2] * 255.0).round() as u32;
-                }
-            }
-        }
-        if !name.is_empty() {
-            materials.insert(
-                name,
-                ObjMaterial { tex: if tex >= 0 { tex } else { fallback_tex }, color },
-            );
-        }
-    }
+    let materials = match mtl_text {
+        Some(mtl) => parse_mtl(mtl, &mut images, textures, fallback_tex),
+        None => HashMap::new(),
+    };
 
     let mut vs: Vec<f32> = Vec::new();
     let mut vts: Vec<f32> = Vec::new();
@@ -102,10 +74,14 @@ pub fn load_obj(
         let line = raw.trim();
         if let Some(rest) = line.strip_prefix("v ") {
             let p: Vec<f32> = rest.split_whitespace().filter_map(|t| t.parse().ok()).collect();
-            vs.extend_from_slice(&p[..3]);
+            if p.len() >= 3 {
+                vs.extend_from_slice(&p[..3]);
+            }
         } else if let Some(rest) = line.strip_prefix("vt ") {
             let p: Vec<f32> = rest.split_whitespace().filter_map(|t| t.parse().ok()).collect();
-            vts.extend_from_slice(&p[..2]);
+            if p.len() >= 2 {
+                vts.extend_from_slice(&p[..2]);
+            }
         } else if let Some(rest) = line.strip_prefix("usemtl ") {
             usemtl.push((faces.len(), rest.trim().to_string()));
         } else if let Some(rest) = line.strip_prefix("f ") {
@@ -175,6 +151,46 @@ pub fn load_obj(
     }
     mesh
 }
+
+fn parse_mtl(
+    mtl: &str,
+    images: &mut Vec<(String, Texture)>,
+    textures: &mut Vec<Texture>,
+    fallback_tex: i32,
+) -> HashMap<String, ObjMaterial> {
+    let mut materials = HashMap::new();
+    let mut name = String::new();
+    let mut tex: i32 = -1;
+    let mut color: u32 = 0x9c9c9c;
+    for line in mtl.lines() {
+        let s = line.trim();
+        if let Some(rest) = s.strip_prefix("newmtl ") {
+            if !name.is_empty() {
+                materials.insert(name.clone(), ObjMaterial { tex, color });
+            }
+            name = rest.trim().to_string();
+            tex = -1;
+            color = 0x9c9c9c;
+        } else if let Some(file) = s.strip_prefix("map_Kd ") {
+            tex = find_texture(file.trim(), images, textures);
+        } else if let Some(rest) = s.strip_prefix("Kd ") {
+            let p: Vec<f32> = rest.split_whitespace().filter_map(|t| t.parse().ok()).collect();
+            if p.len() >= 3 {
+                color = (p[0] * 255.0).round() as u32 * 0x10000
+                    | (p[1] * 255.0).round() as u32 * 0x100
+                    | (p[2] * 255.0).round() as u32;
+            }
+        }
+    }
+    if !name.is_empty() {
+        materials.insert(
+            name,
+            ObjMaterial { tex: if tex >= 0 { tex } else { fallback_tex }, color },
+        );
+    }
+    materials
+}
+
 
 fn find_texture(file: &str, images: &mut Vec<(String, Texture)>, textures: &mut Vec<Texture>) -> i32 {
     for i in 0..images.len() {
