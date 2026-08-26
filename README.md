@@ -20,6 +20,8 @@ node serve.mjs
 
 Open <http://localhost:3000>. Generated wasm-bindgen output goes to `public/pkg/` and is not committed.
 
+The canvas backing store follows its displayed size and device-pixel ratio via `ResizeObserver`; projection, surface, depth, and readback resources resize together.
+
 ## Native winit frontend
 
 ```sh
@@ -27,13 +29,15 @@ cargo run --features native
 cargo run --release --features native -- --uncapped
 ```
 
-Optional verification mode renders a fixed number of frames, writes tightly packed 640×360 RGBA, then exits:
+Optional verification mode renders a fixed number of frames, writes tightly packed RGBA, then exits:
 
 ```sh
 cargo run --release --features native -- --frames 60 --dump frame.rgba
 ```
 
 Set `DREND_ASSETS=/path/to/public` to override the asset root. Default: `./public`.
+
+The native frontend handles live window and DPI changes. The renderer retries transient acquisition failures, reconfigures outdated surfaces, and recreates lost surfaces from the frontend's surface factory.
 
 ## Controls
 
@@ -50,7 +54,7 @@ Set `DREND_ASSETS=/path/to/public` to override the asset root. Default: `./publi
 | `src/math.rs` | Column-major camera and projection matrices |
 | `src/obj.rs` | OBJ/MTL parsing and texture/mesh types |
 | `src/world.rs` | Ground, terrain, buildings, model placement |
-| `src/renderer.rs` | Platform-independent wgpu pipeline, buffers, textures, depth, presentation/readback |
+| `src/renderer.rs` | Platform-independent wgpu pipeline, presentation/readback, resize, and surface recovery |
 | `src/lib.rs` | wasm-bindgen adapter and shared `App` |
 | `src/main.rs` | winit window, native asset I/O, event loop |
 | `public/index.html` | Browser UI shell |

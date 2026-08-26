@@ -9,7 +9,7 @@ use std::sync::Arc;
 use std::time::Instant;
 
 use drend::obj::Texture;
-use drend::renderer::Renderer;
+use drend::renderer::{Renderer, SurfaceFactory};
 use drend::world::{build_world, ModelAssets, World};
 use drend::App;
 use winit::application::ApplicationHandler;
@@ -71,10 +71,22 @@ impl Frontend {
         let assets = std::env::var("DREND_ASSETS").unwrap_or_else(|_| String::from("./public"));
         let (textures, world) = load_world(Path::new(&assets))?;
 
-        let instance = wgpu::Instance::default();
-        let surface = instance.create_surface(window.clone()).map_err(|e| e.to_string())?;
+        let size = window.inner_size();
+        let surface_window = window.clone();
+        let create_surface: SurfaceFactory = Box::new(move |instance| {
+            instance
+                .create_surface(surface_window.clone())
+                .map_err(|e| e.to_string())
+        });
         let present = if self.uncapped { wgpu::PresentMode::Immediate } else { wgpu::PresentMode::Fifo };
-        let renderer = pollster::block_on(Renderer::new(instance, surface, present, VIEW_W, VIEW_H, &textures, &world.meshes))?;
+        let renderer = pollster::block_on(Renderer::new(
+            create_surface,
+            present,
+            size.width.max(1),
+            size.height.max(1),
+            &textures,
+            &world.meshes,
+        ))?;
         self.app = Some(App::from_parts(renderer, world));
         self.last = Some(Instant::now());
         self.window = Some(window);
@@ -138,6 +150,26 @@ impl ApplicationHandler for Frontend {
                 }
             }
             WindowEvent::RedrawRequested => self.render_frame(event_loop),
+            WindowEvent::Resized(size) => {
+                if let Some(app) = &mut self.app {
+                    app.resize(size.width, size.height);
+                }
+                if let Some(window) = &self.window {
+                    window.request_redraw();
+                }
+            }
+            WindowEvent::ScaleFactorChanged { .. } => {
+                if let (Some(app), Some(window)) = (&mut self.app, &self.window) {
+                    let size = window.inner_size();
+                    app.resize(size.width, size.height);
+                    window.request_redraw();
+                }
+            }
+            WindowEvent::Occluded(false) => {
+                if let Some(window) = &self.window {
+                    window.request_redraw();
+                }
+            }
             _ => {}
         }
     }

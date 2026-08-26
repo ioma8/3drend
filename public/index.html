@@ -11,10 +11,17 @@
       color: #9aa4af;
       font: 13px/1.5 system-ui, sans-serif;
       display: flex;
+      flex-wrap: wrap;
       gap: 16px;
       align-items: flex-start;
     }
-    #view { width: 640px; height: 360px; border: 1px solid #333; background: #000; }
+    #view {
+      width: min(640px, 100%);
+      height: auto;
+      aspect-ratio: 16 / 9;
+      border: 1px solid #333;
+      background: #000;
+    }
     #side { display: flex; flex-direction: column; gap: 8px; }
     #mini { width: 200px; height: 200px; border: 1px solid #333; }
     #hud { opacity: 0.7; }

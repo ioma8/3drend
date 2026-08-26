@@ -76,7 +76,27 @@ async function main() {
     backpack: backpackM,
   };
   const app = await App.create(canvas, assets);
-  window.__rust = { app, readFrame: () => app.readFrame() };
+  const resize = () => {
+    const rect = canvas.getBoundingClientRect();
+    if (rect.width === 0 || rect.height === 0) return;
+    const dpr = window.devicePixelRatio || 1;
+    const width = Math.max(1, Math.round(rect.width * dpr));
+    const height = Math.max(1, Math.round(rect.height * dpr));
+    if (canvas.width !== width || canvas.height !== height) {
+      canvas.width = width;
+      canvas.height = height;
+      app.resize(width, height);
+    }
+  };
+  const resizeObserver = new ResizeObserver(resize);
+  window.addEventListener('resize', resize);
+  resizeObserver.observe(canvas);
+  resize();
+  window.__rust = {
+    app,
+    readFrame: () => app.readFrame(),
+    resizeObserver,
+  };
 
   const footprints = app.footprints();
   const markers = app.markers();

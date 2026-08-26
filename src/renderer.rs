@@ -7,6 +7,8 @@ use crate::math::Mat4;
 use crate::obj::{Mesh, Texture, Tri};
 use std::collections::HashMap;
 
+pub type SurfaceFactory = Box<dyn Fn(&wgpu::Instance) -> Result<wgpu::Surface<'static>, String>>;
+
 const STRIDE: u64 = 32; // pos3 + uv2 + color3
 const SKY: [f32; 3] = [232.0 / 255.0, 200.0 / 255.0, 156.0 / 255.0];
 
@@ -57,31 +59,32 @@ struct Group {
 }
 
 pub struct Renderer {
+    instance: wgpu::Instance,
+    create_surface: SurfaceFactory,
     device: wgpu::Device,
     queue: wgpu::Queue,
     surface: wgpu::Surface<'static>,
+    config: wgpu::SurfaceConfiguration,
     pipeline: wgpu::RenderPipeline,
     uniform: wgpu::Buffer,
     depth: wgpu::Texture,
     off: wgpu::Texture,
     readbuf: wgpu::Buffer,
     groups: Vec<Group>,
-    format: wgpu::TextureFormat,
-    w: u32,
-    h: u32,
     view_proj: Mat4,
 }
 
 impl Renderer {
     pub async fn new(
-        instance: wgpu::Instance,
-        surface: wgpu::Surface<'static>,
+        create_surface: SurfaceFactory,
         present_mode: wgpu::PresentMode,
         w: u32,
         h: u32,
         textures: &[Texture],
         meshes: &[Mesh],
     ) -> Result<Renderer, String> {
+        let instance = wgpu::Instance::default();
+        let surface = create_surface(&instance)?;
         let adapter = instance
             .request_adapter(&wgpu::RequestAdapterOptions {
                 compatible_surface: Some(&surface),
@@ -220,15 +223,7 @@ impl Renderer {
             usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
             mapped_at_creation: false,
         });
-        let depth = create_tex(&device, w, h, wgpu::TextureFormat::Depth24Plus, wgpu::TextureUsages::RENDER_ATTACHMENT);
-        // Offscreen target for readback (canvas textures are not COPY_SRC).
-        let off = create_tex(&device, w, h, format, wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_SRC);
-        let readbuf = device.create_buffer(&wgpu::BufferDescriptor {
-            label: None,
-            size: (w * h * 4) as u64,
-            usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
-            mapped_at_creation: false,
-        });
+        let (depth, off, readbuf) = create_frame_resources(&device, w, h, format);
  
          // GPU copies of all textures; flat-color triangles share a 1x1 white
          // texture with the shade carried by the vertex color.
@@ -284,38 +279,74 @@ impl Renderer {
         }
 
         Ok(Renderer {
+            instance,
+            create_surface,
             device,
             queue,
             surface,
+            config,
             pipeline,
             uniform,
             depth,
             off,
             readbuf,
             groups,
-            format,
-            w,
-            h,
             view_proj: Mat4([0.0; 16]),
         })
     }
 
-    /// Draw one frame to the surface with the current camera matrix.
+    pub fn resize(&mut self, width: u32, height: u32) -> bool {
+        if width == 0 || height == 0 || (width == self.config.width && height == self.config.height) {
+            return false;
+        }
+        self.config.width = width;
+        self.config.height = height;
+        self.surface.configure(&self.device, &self.config);
+        (self.depth, self.off, self.readbuf) = create_frame_resources(&self.device, width, height, self.config.format);
+        true
+    }
+
     pub fn render(&mut self, view_proj: &Mat4) {
         self.view_proj = *view_proj;
         self.queue.write_buffer(&self.uniform, 0, bytemuck::cast_slice(&[view_proj.0]));
-        let frame = match self.surface.get_current_texture() {
-            wgpu::CurrentSurfaceTexture::Success(f) | wgpu::CurrentSurfaceTexture::Suboptimal(f) => f,
-            other => {
-                eprintln!("surface acquire: {other:?}");
-                return;
-            }
-        };
+        let Some((frame, reconfigure)) = self.acquire_frame() else { return };
         let view = frame.texture.create_view(&Default::default());
         let mut enc = self.device.create_command_encoder(&Default::default());
         self.draw(&mut enc, &view);
         self.queue.submit([enc.finish()]);
         self.queue.present(frame);
+        if reconfigure {
+            self.surface.configure(&self.device, &self.config);
+        }
+    }
+
+    fn acquire_frame(&mut self) -> Option<(wgpu::SurfaceTexture, bool)> {
+        for _ in 0..2 {
+            match self.surface.get_current_texture() {
+                wgpu::CurrentSurfaceTexture::Success(frame) => return Some((frame, false)),
+                wgpu::CurrentSurfaceTexture::Suboptimal(frame) => return Some((frame, true)),
+                wgpu::CurrentSurfaceTexture::Outdated => self.surface.configure(&self.device, &self.config),
+                wgpu::CurrentSurfaceTexture::Lost => {
+                    if let Err(e) = self.recreate_surface() {
+                        eprintln!("surface recovery failed: {e}");
+                        return None;
+                    }
+                }
+                wgpu::CurrentSurfaceTexture::Timeout | wgpu::CurrentSurfaceTexture::Occluded => return None,
+                wgpu::CurrentSurfaceTexture::Validation => {
+                    eprintln!("surface acquire validation error");
+                    return None;
+                }
+            }
+        }
+        None
+    }
+
+    fn recreate_surface(&mut self) -> Result<(), String> {
+        let surface = (self.create_surface)(&self.instance)?;
+        surface.configure(&self.device, &self.config);
+        self.surface = surface;
+        Ok(())
     }
 
 
@@ -333,9 +364,9 @@ impl Renderer {
             wgpu::TexelCopyTextureInfo { texture: &self.off, mip_level: 0, origin: wgpu::Origin3d::ZERO, aspect: wgpu::TextureAspect::All },
             wgpu::TexelCopyBufferInfo {
                 buffer: &self.readbuf,
-                layout: wgpu::TexelCopyBufferLayout { offset: 0, bytes_per_row: Some(self.w * 4), rows_per_image: None },
+                layout: wgpu::TexelCopyBufferLayout { offset: 0, bytes_per_row: Some(padded_row_bytes(self.config.width)), rows_per_image: None },
             },
-            wgpu::Extent3d { width: self.w, height: self.h, depth_or_array_layers: 1 },
+            wgpu::Extent3d { width: self.config.width, height: self.config.height, depth_or_array_layers: 1 },
         );
         self.queue.submit([enc.finish()]);
         self.map_readbuf().await
@@ -353,15 +384,11 @@ impl Renderer {
                 Ok(Ok(())) => {}
                 _ => return Err(String::from("buffer map failed")),
             }
-            let data = slice
-                .get_mapped_range()
-                .map_err(|e| format!("map range: {e:?}"))?
-                .to_vec();
-            data
+            slice.get_mapped_range().map_err(|e| format!("map range: {e:?}"))?.to_vec()
         };
         self.readbuf.unmap();
-        let mut data = data;
-        if matches!(self.format, wgpu::TextureFormat::Bgra8Unorm | wgpu::TextureFormat::Bgra8UnormSrgb) {
+        let mut data = unpack_rows(&data, self.config.width, self.config.height, padded_row_bytes(self.config.width));
+        if matches!(self.config.format, wgpu::TextureFormat::Bgra8Unorm | wgpu::TextureFormat::Bgra8UnormSrgb) {
             for px in data.chunks_exact_mut(4) {
                 px.swap(0, 2);
             }
@@ -401,7 +428,7 @@ impl Renderer {
 
     /// Surface dimensions in physical pixels.
     pub fn dims(&self) -> (u32, u32) {
-        (self.w, self.h)
+        (self.config.width, self.config.height)
     }
 }
 
@@ -416,6 +443,33 @@ fn create_tex(device: &wgpu::Device, w: u32, h: u32, format: wgpu::TextureFormat
         usage,
         view_formats: &[],
     })
+}
+
+fn create_frame_resources(device: &wgpu::Device, w: u32, h: u32, format: wgpu::TextureFormat) -> (wgpu::Texture, wgpu::Texture, wgpu::Buffer) {
+    let depth = create_tex(device, w, h, wgpu::TextureFormat::Depth24Plus, wgpu::TextureUsages::RENDER_ATTACHMENT);
+    let off = create_tex(device, w, h, format, wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_SRC);
+    let readbuf = device.create_buffer(&wgpu::BufferDescriptor {
+        label: None,
+        size: padded_row_bytes(w) as u64 * h as u64,
+        usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
+        mapped_at_creation: false,
+    });
+    (depth, off, readbuf)
+}
+
+fn padded_row_bytes(width: u32) -> u32 {
+    (width * 4).div_ceil(wgpu::COPY_BYTES_PER_ROW_ALIGNMENT) * wgpu::COPY_BYTES_PER_ROW_ALIGNMENT
+}
+
+fn unpack_rows(data: &[u8], width: u32, height: u32, padded: u32) -> Vec<u8> {
+    let tight = (width * 4) as usize;
+    if padded as usize == tight { return data.to_vec(); }
+    let mut out = vec![0; tight * height as usize];
+    for y in 0..height as usize {
+        let (src, dst) = (y * padded as usize, y * tight);
+        out[dst..dst + tight].copy_from_slice(&data[src..src + tight]);
+    }
+    out
 }
 
 // Rows must be 256-byte aligned for writeTexture; pad when needed.
@@ -457,4 +511,23 @@ fn make_white(device: &wgpu::Device, queue: &wgpu::Queue) -> wgpu::Texture {
         wgpu::Extent3d { width: 1, height: 1, depth_or_array_layers: 1 },
     );
     gpu
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{padded_row_bytes, unpack_rows};
+
+    #[test]
+    fn readback_rows_are_256_byte_aligned() {
+        assert_eq!(padded_row_bytes(1), 256);
+        assert_eq!(padded_row_bytes(64), 256);
+        assert_eq!(padded_row_bytes(65), 512);
+        assert_eq!(padded_row_bytes(640), 2560);
+    }
+
+    #[test]
+    fn padded_readback_rows_are_unpacked() {
+        let data = [1,2,3,4,5,6,7,8,0,0,0,0,0,0,0,0,9,10,11,12,13,14,15,16,0,0,0,0,0,0,0,0];
+        assert_eq!(unpack_rows(&data, 2, 2, 16), (1u8..=16).collect::<Vec<_>>());
+    }
 }

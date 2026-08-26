@@ -11,7 +11,7 @@ pub mod world;
 
 use crate::app::{Camera, KeyState};
 use crate::obj::Texture;
-use crate::renderer::Renderer;
+use crate::renderer::{Renderer, SurfaceFactory};
 use crate::world::{build_world, Footprint, Marker, ModelAssets, World};
 use serde::Deserialize;
 use wasm_bindgen::prelude::*;
@@ -106,18 +106,19 @@ impl App {
     }
 }
 
-// WebGPU instance + surface from the page canvas (wasm frontend only).
+// Surface factory for the wasm canvas. The same factory is reused if the
+// surface is ever lost and must be recreated.
 #[cfg(target_arch = "wasm32")]
-fn make_instance_surface(canvas: web_sys::HtmlCanvasElement) -> Result<(wgpu::Instance, wgpu::Surface<'static>), String> {
-    let instance = wgpu::Instance::default();
-    let surface = instance
-        .create_surface(wgpu::SurfaceTarget::Canvas(canvas))
-        .map_err(|e| e.to_string())?;
-    Ok((instance, surface))
+fn canvas_surface_factory(canvas: web_sys::HtmlCanvasElement) -> SurfaceFactory {
+    Box::new(move |instance| {
+        instance
+            .create_surface(wgpu::SurfaceTarget::Canvas(canvas.clone()))
+            .map_err(|e| e.to_string())
+    })
 }
 #[cfg(not(target_arch = "wasm32"))]
-fn make_instance_surface(_canvas: web_sys::HtmlCanvasElement) -> Result<(wgpu::Instance, wgpu::Surface<'static>), String> {
-    Err(String::from("wasm-only surface creation"))
+fn canvas_surface_factory(_canvas: web_sys::HtmlCanvasElement) -> SurfaceFactory {
+    Box::new(|_| Err(String::from("wasm-only surface creation")))
 }
 
 #[wasm_bindgen]
@@ -141,16 +142,36 @@ impl App {
         };
         let world = build_world(&mut textures, mk(tree), mk(spider), mk(wuson), mk(backpack));
 
-        let (instance, surface) = make_instance_surface(canvas).map_err(|e| JsValue::from_str(&e))?;
-        let renderer = Renderer::new(instance, surface, wgpu::PresentMode::Fifo, VIEW_W, VIEW_H, &textures, &world.meshes)
-            .await
-            .map_err(|e| JsValue::from_str(&e))?;
+        let width = canvas.width().max(1);
+        let height = canvas.height().max(1);
+        let renderer = Renderer::new(
+            canvas_surface_factory(canvas),
+            wgpu::PresentMode::Fifo,
+            width,
+            height,
+            &textures,
+            &world.meshes,
+        )
+        .await
+        .map_err(|e| JsValue::from_str(&e))?;
         Ok(App::from_parts(renderer, world))
     }
 
     /// Set the state of one key (called from JS on keydown/keyup).
     pub fn key(&mut self, code: &str, down: bool) {
         self.keys.set(code, down);
+    }
+
+    /// Resize the render surface in physical pixels and update projection.
+    pub fn resize(&mut self, width: u32, height: u32) {
+        if self.renderer.resize(width, height) {
+            self.proj = math::Mat4::perspective(
+                70.0_f32.to_radians(),
+                width as f32 / height as f32,
+                0.05,
+                1000.0,
+            );
+        }
     }
 
     /// Advance the simulation and render one frame.
@@ -180,6 +201,3 @@ impl App {
         self.renderer.read_frame().await.map_err(|e| JsValue::from_str(&e))
     }
 }
-
-const VIEW_W: u32 = 640;
-const VIEW_H: u32 = 360;
