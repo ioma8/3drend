@@ -65,11 +65,13 @@ impl Frontend {
             .with_title("3drend")
             .with_inner_size(PhysicalSize::new(VIEW_W, VIEW_H));
         let window = Arc::new(event_loop.create_window(attrs).map_err(|e| e.to_string())?);
+        window.focus_window();
+        window.set_visible(true);
 
         let assets = std::env::var("DREND_ASSETS").unwrap_or_else(|_| String::from("./public"));
         let (textures, world) = load_world(Path::new(&assets))?;
 
-        let instance = wgpu::Instance::new(&wgpu::InstanceDescriptor::default());
+        let instance = wgpu::Instance::default();
         let surface = instance.create_surface(window.clone()).map_err(|e| e.to_string())?;
         let present = if self.uncapped { wgpu::PresentMode::Immediate } else { wgpu::PresentMode::Fifo };
         let renderer = pollster::block_on(Renderer::new(instance, surface, present, VIEW_W, VIEW_H, &textures, &world.meshes))?;
@@ -97,9 +99,11 @@ impl Frontend {
         if let Some(max) = self.max_frames {
             if self.frames >= max {
                 if let Some(path) = &self.dump {
-                    let data = pollster::block_on(app.read_frame()).expect("read frame");
-                    std::fs::write(path, &data).expect("write dump");
-                    eprintln!("dumped {} bytes to {}", data.len(), path.display());
+                    let off = pollster::block_on(app.read_frame()).expect("read frame");
+                    std::fs::write(path, &off).expect("write dump");
+                    let surf = pollster::block_on(app.capture_surface()).expect("capture surface");
+                    std::fs::write(format!("{}.surface", path.display()), &surf).expect("write surface dump");
+                    eprintln!("dumped offscreen {} + surface {} bytes", off.len(), surf.len());
                 }
                 event_loop.exit();
             }

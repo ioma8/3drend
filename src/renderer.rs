@@ -87,6 +87,7 @@ impl Renderer {
                 compatible_surface: Some(&surface),
                 power_preference: wgpu::PowerPreference::default(),
                 force_fallback_adapter: false,
+                apply_limit_buckets: false,
             })
             .await
             .map_err(|e| e.to_string())?;
@@ -95,6 +96,7 @@ impl Renderer {
                 label: None,
                 required_features: wgpu::Features::empty(),
                 required_limits: wgpu::Limits::default(),
+                experimental_features: wgpu::ExperimentalFeatures::default(),
                 memory_hints: wgpu::MemoryHints::default(),
                 trace: wgpu::Trace::Off,
             })
@@ -111,8 +113,9 @@ impl Renderer {
             formats[0]
         };
         let config = wgpu::SurfaceConfiguration {
-            usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
+            usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_SRC,
             format,
+            color_space: wgpu::SurfaceColorSpace::Auto,
             width: w,
             height: h,
             present_mode,
@@ -158,8 +161,8 @@ impl Renderer {
         });
         let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: None,
-            bind_group_layouts: &[&bind_layout],
-            push_constant_ranges: &[],
+            bind_group_layouts: &[Some(&bind_layout)],
+            immediate_size: 0,
         });
         let pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
             label: None,
@@ -168,7 +171,7 @@ impl Renderer {
                 module: &shader,
                 entry_point: Some("vs"),
                 compilation_options: Default::default(),
-                buffers: &[wgpu::VertexBufferLayout {
+                buffers: &[Some(wgpu::VertexBufferLayout {
                     array_stride: STRIDE,
                     step_mode: wgpu::VertexStepMode::Vertex,
                     attributes: &[
@@ -176,7 +179,7 @@ impl Renderer {
                         wgpu::VertexAttribute { format: wgpu::VertexFormat::Float32x2, offset: 12, shader_location: 1 },
                         wgpu::VertexAttribute { format: wgpu::VertexFormat::Float32x3, offset: 20, shader_location: 2 },
                     ],
-                }],
+                })],
             },
             primitive: wgpu::PrimitiveState {
                 topology: wgpu::PrimitiveTopology::TriangleList,
@@ -185,8 +188,8 @@ impl Renderer {
             },
             depth_stencil: Some(wgpu::DepthStencilState {
                 format: wgpu::TextureFormat::Depth24Plus,
-                depth_write_enabled: true,
-                depth_compare: wgpu::CompareFunction::Less,
+                depth_write_enabled: Some(true),
+                depth_compare: Some(wgpu::CompareFunction::Less),
                 stencil: Default::default(),
                 bias: Default::default(),
             }),
@@ -201,7 +204,7 @@ impl Renderer {
                     write_mask: wgpu::ColorWrites::ALL,
                 })],
             }),
-            multiview: None,
+            multiview_mask: None,
             cache: None,
         });
         let sampler = device.create_sampler(&wgpu::SamplerDescriptor {
@@ -297,14 +300,44 @@ impl Renderer {
         })
     }
 
-    /// Draw one frame to the canvas with the current camera matrix.
+    /// Draw one frame to the surface with the current camera matrix.
     pub fn render(&mut self, view_proj: &Mat4) {
         self.view_proj = *view_proj;
         self.queue.write_buffer(&self.uniform, 0, bytemuck::cast_slice(&[view_proj.0]));
-        let frame = self.surface.get_current_texture().expect("surface texture");
+        let frame = match self.surface.get_current_texture() {
+            wgpu::CurrentSurfaceTexture::Success(f) | wgpu::CurrentSurfaceTexture::Suboptimal(f) => f,
+            other => {
+                eprintln!("surface acquire: {other:?}");
+                return;
+            }
+        };
         let view = frame.texture.create_view(&Default::default());
-        let enc = self.encode(&view);
-        self.queue.submit([enc]);
+        let mut enc = self.device.create_command_encoder(&Default::default());
+        self.draw(&mut enc, &view);
+        self.queue.submit([enc.finish()]);
+    }
+
+    /// Render the current camera into the surface and copy the presented
+    /// texture back as RGBA (diagnostic: verifies the surface path).
+    pub async fn capture_surface(&mut self) -> Result<Vec<u8>, String> {
+        self.queue.write_buffer(&self.uniform, 0, bytemuck::cast_slice(&[self.view_proj.0]));
+        let frame = match self.surface.get_current_texture() {
+            wgpu::CurrentSurfaceTexture::Success(f) | wgpu::CurrentSurfaceTexture::Suboptimal(f) => f,
+            other => return Err(format!("surface: {other:?}")),
+        };
+        let view = frame.texture.create_view(&Default::default());
+        let mut enc = self.device.create_command_encoder(&Default::default());
+        self.draw(&mut enc, &view);
+        enc.copy_texture_to_buffer(
+            wgpu::TexelCopyTextureInfo { texture: &frame.texture, mip_level: 0, origin: wgpu::Origin3d::ZERO, aspect: wgpu::TextureAspect::All },
+            wgpu::TexelCopyBufferInfo {
+                buffer: &self.readbuf,
+                layout: wgpu::TexelCopyBufferLayout { offset: 0, bytes_per_row: Some(self.w * 4), rows_per_image: None },
+            },
+            wgpu::Extent3d { width: self.w, height: self.h, depth_or_array_layers: 1 },
+        );
+        self.queue.submit([enc.finish()]);
+        self.map_readbuf().await
     }
 
     /// Render the current camera into the offscreen target and read it back
@@ -312,7 +345,9 @@ impl Renderer {
     pub async fn read_frame(&mut self) -> Result<Vec<u8>, String> {
         self.queue.write_buffer(&self.uniform, 0, bytemuck::cast_slice(&[self.view_proj.0]));
         let off_view = self.off.create_view(&Default::default());
-        self.queue.submit([self.encode(&off_view)]);
+        let mut enc = self.device.create_command_encoder(&Default::default());
+        self.draw(&mut enc, &off_view);
+        self.queue.submit([enc.finish()]);
 
         let mut enc = self.device.create_command_encoder(&Default::default());
         enc.copy_texture_to_buffer(
@@ -324,19 +359,25 @@ impl Renderer {
             wgpu::Extent3d { width: self.w, height: self.h, depth_or_array_layers: 1 },
         );
         self.queue.submit([enc.finish()]);
+        self.map_readbuf().await
+    }
 
+    async fn map_readbuf(&mut self) -> Result<Vec<u8>, String> {
         let (tx, rx) = futures_channel::oneshot::channel();
         let data = {
             let slice = self.readbuf.slice(..);
             slice.map_async(wgpu::MapMode::Read, move |res| {
                 let _ = tx.send(res);
             });
-            let _ = self.device.poll(wgpu::PollType::Wait);
+            let _ = self.device.poll(wgpu::PollType::wait_indefinitely());
             match rx.await {
                 Ok(Ok(())) => {}
                 _ => return Err(String::from("buffer map failed")),
             }
-            let data = slice.get_mapped_range().to_vec();
+            let data = slice
+                .get_mapped_range()
+                .map_err(|e| format!("map range: {e:?}"))?
+                .to_vec();
             data
         };
         self.readbuf.unmap();
@@ -349,36 +390,34 @@ impl Renderer {
         Ok(data)
     }
 
-    fn encode(&self, target: &wgpu::TextureView) -> wgpu::CommandBuffer {
-        let mut enc = self.device.create_command_encoder(&Default::default());
-        {
-            let mut pass = enc.begin_render_pass(&wgpu::RenderPassDescriptor {
-                label: None,
-                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                    view: target,
-                    depth_slice: None,
-                    resolve_target: None,
-                    ops: wgpu::Operations {
-                        load: wgpu::LoadOp::Clear(wgpu::Color { r: SKY[0] as f64, g: SKY[1] as f64, b: SKY[2] as f64, a: 1.0 }),
-                        store: wgpu::StoreOp::Store,
-                    },
-                })],
-                depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
-                    view: &self.depth.create_view(&Default::default()),
-                    depth_ops: Some(wgpu::Operations { load: wgpu::LoadOp::Clear(1.0), store: wgpu::StoreOp::Store }),
-                    stencil_ops: None,
-                }),
-                timestamp_writes: None,
-                occlusion_query_set: None,
-            });
-            pass.set_pipeline(&self.pipeline);
-            for g in &self.groups {
-                pass.set_bind_group(0, &g.bind_group, &[]);
-                pass.set_vertex_buffer(0, g.buffer.slice(..));
-                pass.draw(0..g.count, 0..1);
-            }
+    /// Record the scene pass (sky clear + all draw groups) into `enc`.
+    fn draw(&self, enc: &mut wgpu::CommandEncoder, target: &wgpu::TextureView) {
+        let mut pass = enc.begin_render_pass(&wgpu::RenderPassDescriptor {
+            label: None,
+            color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                view: target,
+                depth_slice: None,
+                resolve_target: None,
+                ops: wgpu::Operations {
+                    load: wgpu::LoadOp::Clear(wgpu::Color { r: SKY[0] as f64, g: SKY[1] as f64, b: SKY[2] as f64, a: 1.0 }),
+                    store: wgpu::StoreOp::Store,
+                },
+            })],
+            depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
+                view: &self.depth.create_view(&Default::default()),
+                depth_ops: Some(wgpu::Operations { load: wgpu::LoadOp::Clear(1.0), store: wgpu::StoreOp::Store }),
+                stencil_ops: None,
+            }),
+            timestamp_writes: None,
+            occlusion_query_set: None,
+            multiview_mask: None,
+        });
+        pass.set_pipeline(&self.pipeline);
+        for g in &self.groups {
+            pass.set_bind_group(0, &g.bind_group, &[]);
+            pass.set_vertex_buffer(0, g.buffer.slice(..));
+            pass.draw(0..g.count, 0..1);
         }
-        enc.finish()
     }
 
     /// Surface dimensions in physical pixels.

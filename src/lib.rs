@@ -104,12 +104,17 @@ impl App {
             renderer,
         }
     }
+
+    /// Read back what the surface actually presented (diagnostic).
+    pub async fn capture_surface(&mut self) -> Result<Vec<u8>, String> {
+        self.renderer.capture_surface().await
+    }
 }
 
 // WebGPU instance + surface from the page canvas (wasm frontend only).
 #[cfg(target_arch = "wasm32")]
 fn make_instance_surface(canvas: web_sys::HtmlCanvasElement) -> Result<(wgpu::Instance, wgpu::Surface<'static>), String> {
-    let instance = wgpu::Instance::new(&wgpu::InstanceDescriptor::default());
+    let instance = wgpu::Instance::default();
     let surface = instance
         .create_surface(wgpu::SurfaceTarget::Canvas(canvas))
         .map_err(|e| e.to_string())?;

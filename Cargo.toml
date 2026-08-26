@@ -16,11 +16,17 @@ required-features = ["native"]
 default = []
 native = ["dep:winit", "dep:image", "dep:pollster"]
 
+# Local fix: macOS 26 reports occlusion state with different bit values, so
+# wgpu's check never sees the window as visible (issue #9430) and nothing is
+# ever presented. Patch uses the window's isVisible property instead.
+[patch.crates-io]
+wgpu-hal = { path = "vendor/wgpu-hal" }
+
 [dependencies]
 wasm-bindgen = "0.2"
 wasm-bindgen-futures = "0.4"
 web-sys = { version = "0.3", features = ["HtmlCanvasElement"] }
-wgpu = { version = "26", features = ["web"] }
+wgpu = { version = "30", features = ["web"] }
 bytemuck = { version = "1", features = ["derive"] }
 serde = { version = "1", features = ["derive"] }
 serde-wasm-bindgen = "0.6"
