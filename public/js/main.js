@@ -1,7 +1,8 @@
 // Thin glue between the page and the Rust core: asset I/O (fetch, image
 // decode), input events, the frame loop, and the minimap overlay.
 // All geometry, camera, and rendering live in Rust (wasm-bindgen + wgpu).
-import init, { App } from '../pkg/drend.js';
+// The ?v= query busts the browser's module cache across rebuilds.
+const { default: init, App } = await import('../pkg/drend.js?v=' + Date.now());
 
 // World textures, in the order Rust assigns their indices (0..5).
 const WORLD_TEX = [

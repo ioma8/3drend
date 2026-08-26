@@ -26,6 +26,7 @@ pub struct World {
 }
 
 /// Raw assets for one downloaded model, decoded by the JS glue.
+#[derive(Clone)]
 pub struct ModelAssets {
     pub obj_text: String,
     pub mtl_text: Option<String>,
@@ -173,10 +174,10 @@ pub fn transform_mesh(mesh: &mut Mesh, sx: f32, sy: f32, sz: f32, rot_y: f32, tx
 /// indices from `map_Kd` images stay stable.
 pub fn build_world(
     textures: &mut Vec<Texture>,
-    tree: &ModelAssets,
-    spider: &ModelAssets,
-    wuson: &ModelAssets,
-    backpack: &ModelAssets,
+    tree: ModelAssets,
+    spider: ModelAssets,
+    wuson: ModelAssets,
+    backpack: ModelAssets,
 ) -> World {
     let mut meshes: Vec<Mesh> = Vec::new();
     let mut footprints = Vec::new();
@@ -210,10 +211,10 @@ pub fn build_world(
     }
 
     // downloaded models
-    let tree_mesh = load_obj(&tree.obj_text, tree.mtl_text.as_deref(), &tree.images, textures, tree.fallback);
-    let spider_mesh = load_obj(&spider.obj_text, spider.mtl_text.as_deref(), &spider.images, textures, spider.fallback);
-    let wuson_mesh = load_obj(&wuson.obj_text, wuson.mtl_text.as_deref(), &wuson.images, textures, wuson.fallback);
-    let backpack_mesh = load_obj(&backpack.obj_text, backpack.mtl_text.as_deref(), &backpack.images, textures, backpack.fallback);
+    let tree_mesh = load_obj(&tree.obj_text, tree.mtl_text.as_deref(), tree.images, textures, tree.fallback);
+    let spider_mesh = load_obj(&spider.obj_text, spider.mtl_text.as_deref(), spider.images, textures, spider.fallback);
+    let wuson_mesh = load_obj(&wuson.obj_text, wuson.mtl_text.as_deref(), wuson.images, textures, wuson.fallback);
+    let backpack_mesh = load_obj(&backpack.obj_text, backpack.mtl_text.as_deref(), backpack.images, textures, backpack.fallback);
 
     for (tx, tz, rot) in [(-10.0, 10.0, 0.5f32), (30.0, -30.0, 2.2), (-35.0, -15.0, 4.1), (10.0, -50.0, 1.2)] {
         let mut m = tree_mesh.clone();
@@ -266,7 +267,7 @@ mod tests {
     fn world_has_expected_triangle_count() {
         let mut textures = vec![Texture { w: 1, h: 1, data: vec![0; 4] }; 6];
         let a = empty_assets();
-        let w = build_world(&mut textures, &a, &a, &a, &a);
+        let w = build_world(&mut textures, a.clone(), a.clone(), a.clone(), a.clone());
         // ground 20x20x2 + terrain 12x12x2 + 5 boxes x12 + 3 pyramids x4 + pedestal 12
         assert_eq!(w.meshes.iter().map(|m| m.tris.len()).sum::<usize>(), 800 + 288 + 60 + 12 + 12);
         assert_eq!(w.footprints.len(), 5);
@@ -277,7 +278,7 @@ mod tests {
     fn building_footprint_math() {
         let mut textures = vec![Texture { w: 1, h: 1, data: vec![0; 4] }; 6];
         let a = empty_assets();
-        let w = build_world(&mut textures, &a, &a, &a, &a);
+        let w = build_world(&mut textures, a.clone(), a.clone(), a.clone(), a.clone());
         let first = w.footprints[0];
         assert_eq!((first.x, first.z, first.w, first.d), (-60.0, 0.0, 40.0, 40.0));
     }

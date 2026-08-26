@@ -57,7 +57,7 @@ struct ObjMaterial {
 pub fn load_obj(
     obj_text: &str,
     mtl_text: Option<&str>,
-    images: &[(String, Texture)],
+    mut images: Vec<(String, Texture)>,
     textures: &mut Vec<Texture>,
     fallback_tex: i32,
 ) -> Mesh {
@@ -76,7 +76,7 @@ pub fn load_obj(
                 tex = -1;
                 color = 0x9c9c9c;
             } else if let Some(file) = s.strip_prefix("map_Kd ") {
-                tex = find_texture(file.trim(), images, textures);
+                tex = find_texture(file.trim(), &mut images, textures);
             } else if let Some(rest) = s.strip_prefix("Kd ") {
                 let p: Vec<f32> = rest.split_whitespace().filter_map(|t| t.parse().ok()).collect();
                 if p.len() >= 3 {
@@ -176,10 +176,10 @@ pub fn load_obj(
     mesh
 }
 
-fn find_texture(file: &str, images: &[(String, Texture)], textures: &mut Vec<Texture>) -> i32 {
-    for (name, tex) in images {
-        if name == file {
-            textures.push(tex.clone());
+fn find_texture(file: &str, images: &mut Vec<(String, Texture)>, textures: &mut Vec<Texture>) -> i32 {
+    for i in 0..images.len() {
+        if images[i].0 == file {
+            textures.push(images.swap_remove(i).1);
             return (textures.len() - 1) as i32;
         }
     }
@@ -193,7 +193,7 @@ mod tests {
     #[test]
     fn parses_quads_vt_and_negative_indices() {
         let obj = "v 0 0 0\nv 1 0 0\nv 1 1 0\nv 0 1 0\nvt 0 1\nvt 1 1\nvt 1 0\nvt 0 0\nf 1/1 2/2 3/3 4/4\nf -4/-4 -3/-3 -2/-2 -1/-1\n";
-        let m = load_obj(obj, None, &[], &mut vec![], -1);
+        let m = load_obj(obj, None, vec![], &mut vec![], -1);
         assert_eq!(m.tris.len(), 4, "two quads, two tris each");
         // v flip: vt (0,1) is the bottom-left OBJ corner -> v = 0
         assert_eq!(m.tris[0].a.u, 0.0);
@@ -208,7 +208,7 @@ mod tests {
     fn mtl_kd_and_map_kd() {
         let mtl = "newmtl mat\nKd 0.5 0.25 0.125\n";
         let obj = "v 0 0 0\nv 1 0 0\nv 0 1 0\nusemtl mat\nf 1 2 3\n";
-        let m = load_obj(obj, Some(mtl), &[], &mut vec![], -1);
+        let m = load_obj(obj, Some(mtl), vec![], &mut vec![], -1);
         assert_eq!(m.tris.len(), 1);
         assert_eq!(m.tris[0].color, 0x804020);
         assert_eq!(m.tris[0].tex, -1, "no map_Kd -> flat");
@@ -220,7 +220,7 @@ mod tests {
         let obj = "v 0 0 0\nv 1 0 0\nv 0 1 0\nusemtl mat\nf 1 2 3\n";
         let mut textures = vec![];
         let img = Texture { w: 2, h: 2, data: vec![0; 16] };
-        let m = load_obj(obj, Some(mtl), &[(String::from(".\\tex.jpg"), img)], &mut textures, -1);
+        let m = load_obj(obj, Some(mtl), vec![(String::from(".\\tex.jpg"), img)], &mut textures, -1);
         assert_eq!(textures.len(), 1, "image appended to shared list");
         assert_eq!(m.tris[0].tex, 0);
     }
@@ -228,7 +228,7 @@ mod tests {
     #[test]
     fn missing_mtl_falls_back_to_flat_gray() {
         let obj = "v 0 0 0\nv 1 0 0\nv 0 1 0\nf 1 2 3\n";
-        let m = load_obj(obj, None, &[], &mut vec![], 7);
+        let m = load_obj(obj, None, vec![], &mut vec![], 7);
         assert_eq!(m.tris[0].tex, -1, "no material -> flat");
         assert_eq!(m.tris[0].color, 0x9c9c9c);
     }

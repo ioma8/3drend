@@ -18,12 +18,37 @@ const VIEW_H: u32 = 360;
 const MOVE_SPEED: f32 = 40.0; // world units / second
 const TURN_SPEED: f32 = 1.6; // radians / second
 
+/// RGBA image bytes. Deserialized through `deserialize_any` so
+/// serde-wasm-bindgen uses its fast `byte_buf` copy path; plain `Vec<u8>`
+/// would go through per-element sequence access (seconds for large images).
+#[derive(Clone)]
+struct Rgba(Vec<u8>);
+
+impl<'de> serde::Deserialize<'de> for Rgba {
+    fn deserialize<D>(d: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        struct V;
+        impl<'de> serde::de::Visitor<'de> for V {
+            type Value = Rgba;
+            fn expecting(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+                f.write_str("a byte buffer")
+            }
+            fn visit_byte_buf<E: serde::de::Error>(self, v: Vec<u8>) -> Result<Rgba, E> {
+                Ok(Rgba(v))
+            }
+        }
+        d.deserialize_any(V)
+    }
+}
+
 // Assets decoded by the JS glue, in the order it fetches them.
 #[derive(Deserialize)]
 struct TexIn {
     w: u32,
     h: u32,
-    data: Vec<u8>, // RGBA
+    data: Rgba, // RGBA
 }
 
 #[derive(Deserialize)]
@@ -31,7 +56,7 @@ struct ImageIn {
     file: String, // raw map_Kd value from the MTL, e.g. `.\tex.jpg`
     w: u32,
     h: u32,
-    data: Vec<u8>, // RGBA
+    data: Rgba, // RGBA
 }
 
 #[derive(Deserialize)]
@@ -92,21 +117,21 @@ impl App {
     /// Create the renderer and build the world from JS-decoded assets.
     #[wasm_bindgen(js_name = create)]
     pub async fn create(canvas: web_sys::HtmlCanvasElement, assets: JsValue) -> Result<App, JsValue> {
-        let assets: Assets = serde_wasm_bindgen::from_value(assets)
+        // Move the decoded image bytes straight into Rust textures: zero
+        // copies after the serde transfer.
+        let Assets { world, tree, spider, wuson, backpack } = serde_wasm_bindgen::from_value(assets)
             .map_err(|e| JsValue::from_str(&e.to_string()))?;
-
-        let mut textures: Vec<Texture> = assets
-            .world
-            .iter()
-            .map(|t| Texture { w: t.w, h: t.h, data: t.data.clone() })
+        let mut textures: Vec<Texture> = world
+            .into_iter()
+            .map(|t| Texture { w: t.w, h: t.h, data: t.data.0 })
             .collect();
-        let mk = |m: &ModelIn| ModelAssets {
-            obj_text: m.obj.clone(),
-            mtl_text: m.mtl.clone(),
-            images: m.images.iter().map(|i| (i.file.clone(), Texture { w: i.w, h: i.h, data: i.data.clone() })).collect(),
+        let mk = |m: ModelIn| ModelAssets {
+            obj_text: m.obj,
+            mtl_text: m.mtl,
+            images: m.images.into_iter().map(|i| (i.file, Texture { w: i.w, h: i.h, data: i.data.0 })).collect(),
             fallback: m.fallback,
         };
-        let world = build_world(&mut textures, &mk(&assets.tree), &mk(&assets.spider), &mk(&assets.wuson), &mk(&assets.backpack));
+        let world = build_world(&mut textures, mk(tree), mk(spider), mk(wuson), mk(backpack));
 
         let renderer = Renderer::new(canvas, VIEW_W, VIEW_H, &textures, &world.meshes).await?;
         Ok(App {
@@ -201,3 +226,4 @@ impl App {
         self.renderer.read_frame().await
     }
 }
+
