@@ -1,0 +1,20 @@
+name: Rust CI
+
+on:
+  push:
+    branches: [master, rust]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  check:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo test
+      - run: cargo check --features native
+      - run: cargo check --target wasm32-unknown-unknown

@@ -1,48 +1,71 @@
 # 3drend
 
-A 3D engine built on the vector/polygon-projection method — project polygon
-vertices, rasterize triangles, depth-test per pixel. No raycasting, no
-raytracing.
+A polygon-projection 3D engine written in Rust. It projects mesh vertices, rasterizes triangles with WebGPU/wgpu, and depth-tests fragments. No raycasting or ray tracing.
 
-This branch renders with WebGPU through the **wgpu crate**, compiled to WASM
-with wasm-bindgen. All world building, OBJ/MTL parsing, camera math, and
-rendering live in Rust (`src/`); a thin JS glue (`public/js/main.js`) handles
-asset I/O, image decode, input, and the frame loop.
+The repository has one engine implementation: the Rust core in `src/`. Two thin frontends use it:
 
-## Build
+- **HTML/WebGPU:** Rust compiled to WASM with wasm-bindgen. `public/js/main.js` only fetches/decodes browser assets, forwards input, drives `requestAnimationFrame`, and draws the minimap. It contains no rendering or world logic.
+- **Native/winit:** `src/main.rs` loads the same assets from disk and supplies a native wgpu surface. It runs the same `App`, camera, world, mesh parser, and renderer.
 
-Requires Rust with the `wasm32-unknown-unknown` target and wasm-pack:
+## Browser frontend
+
+Requires Rust, the `wasm32-unknown-unknown` target, and wasm-pack.
 
 ```sh
 rustup target add wasm32-unknown-unknown
 cargo binstall wasm-pack   # or: cargo install wasm-pack
-./build.sh                 # wasm-pack build --target web --release --out-dir public/pkg
+./build.sh
+node serve.mjs
 ```
 
-## Native (winit)
+Open <http://localhost:3000>. Generated wasm-bindgen output goes to `public/pkg/` and is not committed.
 
-The same core, compiled to a native desktop app:
+## Native winit frontend
 
 ```sh
-cargo run --features native                  # opens a window (vsync'd)
-cargo run --features native -- --uncapped    # PresentMode::Immediate, prints fps
-cargo run --features native -- --frames 60 --dump frame.rgba   # verify: render 60 frames, dump raw RGBA, exit
+cargo run --features native
+cargo run --release --features native -- --uncapped
 ```
 
-`DREND_ASSETS` overrides the asset directory (default `./public`). Controls are the same; the numeric output matches the browser build pixel-for-pixel. Rendering cost is ~1 ms/frame; vsync and the compositor, not the engine, cap the visible rate.
+Optional verification mode renders a fixed number of frames, writes tightly packed 640×360 RGBA, then exits:
 
-## Test
+```sh
+cargo run --release --features native -- --frames 60 --dump frame.rgba
+```
 
-`cargo test` runs the native unit tests (matrix math pinned to values
-verified against the previous renderers, OBJ/MTL parsing, world structure).
+Set `DREND_ASSETS=/path/to/public` to override the asset root. Default: `./public`.
 
-## Layout
+## Controls
 
-- `src/math.rs` — column-major 4x4 matrix math (exact port of the engine's camera math)
-- `src/obj.rs` — OBJ + MTL parser and asset types
-- `src/world.rs` — scene assembly: ground, terrain, buildings, downloaded models
-- `src/renderer.rs` — wgpu renderer: pipeline, per-texture draw groups, readback (platform-agnostic)
-- `src/app.rs` — shared camera + input state (used by both frontends)
-- `src/lib.rs` — wasm-bindgen glue and `App` (shared app state)
-- `src/main.rs` — winit desktop frontend (`--features native`)
-- `public/` — static web root: page, JS glue, models, textures, `pkg/` (build output)
+- `W` / `S`: forward / backward
+- `A` / `D`: strafe
+- `←` / `→`: yaw
+- `↑` / `↓`: pitch
+
+## Architecture
+
+| Path | Responsibility |
+|---|---|
+| `src/app.rs` | Shared camera and input state |
+| `src/math.rs` | Column-major camera and projection matrices |
+| `src/obj.rs` | OBJ/MTL parsing and texture/mesh types |
+| `src/world.rs` | Ground, terrain, buildings, model placement |
+| `src/renderer.rs` | Platform-independent wgpu pipeline, buffers, textures, depth, presentation/readback |
+| `src/lib.rs` | wasm-bindgen adapter and shared `App` |
+| `src/main.rs` | winit window, native asset I/O, event loop |
+| `public/index.html` | Browser UI shell |
+| `public/js/main.js` | Browser-only I/O/input/rAF/minimap adapter |
+
+## Verification
+
+```sh
+cargo test
+cargo check --features native
+cargo check --target wasm32-unknown-unknown
+```
+
+The browser and native frontends have matching numeric output: default-camera brick probe `(201,104) = (178,62,46)`, with equivalent sky/brick/ocean coverage.
+
+## macOS 26 wgpu patch
+
+macOS 26 reports `NSWindow.occlusionState` with values that do not match wgpu's legacy visible-bit check, causing every native frame acquisition to return `Occluded`. `vendor/wgpu-hal` contains a one-line patch that checks `NSWindow.isVisible` instead; Cargo applies it through `[patch.crates-io]`. Remove the patch when upstream resolves [wgpu #9430](https://github.com/gfx-rs/wgpu/issues/9430).

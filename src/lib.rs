@@ -104,11 +104,6 @@ impl App {
             renderer,
         }
     }
-
-    /// Read back what the surface actually presented (diagnostic).
-    pub async fn capture_surface(&mut self) -> Result<Vec<u8>, String> {
-        self.renderer.capture_surface().await
-    }
 }
 
 // WebGPU instance + surface from the page canvas (wasm frontend only).

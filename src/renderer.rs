@@ -113,7 +113,7 @@ impl Renderer {
             formats[0]
         };
         let config = wgpu::SurfaceConfiguration {
-            usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_SRC,
+            usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
             format,
             color_space: wgpu::SurfaceColorSpace::Auto,
             width: w,
@@ -318,29 +318,6 @@ impl Renderer {
         self.queue.present(frame);
     }
 
-    /// Render the current camera into the surface and copy the presented
-    /// texture back as RGBA (diagnostic: verifies the surface path).
-    pub async fn capture_surface(&mut self) -> Result<Vec<u8>, String> {
-        self.queue.write_buffer(&self.uniform, 0, bytemuck::cast_slice(&[self.view_proj.0]));
-        let frame = match self.surface.get_current_texture() {
-            wgpu::CurrentSurfaceTexture::Success(f) | wgpu::CurrentSurfaceTexture::Suboptimal(f) => f,
-            other => return Err(format!("surface: {other:?}")),
-        };
-        let view = frame.texture.create_view(&Default::default());
-        let mut enc = self.device.create_command_encoder(&Default::default());
-        self.draw(&mut enc, &view);
-        enc.copy_texture_to_buffer(
-            wgpu::TexelCopyTextureInfo { texture: &frame.texture, mip_level: 0, origin: wgpu::Origin3d::ZERO, aspect: wgpu::TextureAspect::All },
-            wgpu::TexelCopyBufferInfo {
-                buffer: &self.readbuf,
-                layout: wgpu::TexelCopyBufferLayout { offset: 0, bytes_per_row: Some(self.w * 4), rows_per_image: None },
-            },
-            wgpu::Extent3d { width: self.w, height: self.h, depth_or_array_layers: 1 },
-        );
-        self.queue.submit([enc.finish()]);
-        self.queue.present(frame);
-        self.map_readbuf().await
-    }
 
     /// Render the current camera into the offscreen target and read it back
     /// as tightly packed RGBA bytes (used for numeric verification).

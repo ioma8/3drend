@@ -99,11 +99,9 @@ impl Frontend {
         if let Some(max) = self.max_frames {
             if self.frames >= max {
                 if let Some(path) = &self.dump {
-                    let off = pollster::block_on(app.read_frame()).expect("read frame");
-                    std::fs::write(path, &off).expect("write dump");
-                    let surf = pollster::block_on(app.capture_surface()).expect("capture surface");
-                    std::fs::write(format!("{}.surface", path.display()), &surf).expect("write surface dump");
-                    eprintln!("dumped offscreen {} + surface {} bytes", off.len(), surf.len());
+                    let data = pollster::block_on(app.read_frame()).expect("read frame");
+                    std::fs::write(path, &data).expect("write dump");
+                    eprintln!("dumped {} bytes to {}", data.len(), path.display());
                 }
                 event_loop.exit();
             }
