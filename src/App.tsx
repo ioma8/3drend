@@ -1,7 +1,8 @@
 import React, { useEffect, useRef } from 'react';
 import './App.css';
-import { Engine, loadImage, makeTexture } from './engine3d';
+import { loadImage, makeTexture } from './engine3d';
 import { buildWorld } from './world';
+import { WgpuRenderer, mat4Multiply, projectionMatrix, viewMatrix } from './wgpuRenderer';
 
 const VIEW_W = 640;
 const VIEW_H = 360;
@@ -20,31 +21,25 @@ function App() {
     if (!view || !mini) return;
     view.width = VIEW_W;
     view.height = VIEW_H;
-    const ctx = view.getContext('2d');
     const miniCtx = mini.getContext('2d');
-    if (!ctx || !miniCtx) return;
+    if (!miniCtx) return;
 
     let disposed = false;
     let raf = 0;
 
     (async () => {
-      const engine = new Engine(VIEW_W, VIEW_H);
-      const cam = engine.camera;
-      cam.x = 0;
-      cam.y = 30;
-      cam.z = -70;
-      cam.yaw = 0;
-      cam.pitch = -0.4;
+      const cam = { x: 0, y: 30, z: -70, yaw: 0, pitch: -0.4 };
 
-      // base textures
+      // load textures into CPU-side Texture objects (shared with world.ts)
       const texNames = ['worldmap', 'grasslight', 'wall1', 'wall2', 'roof', 'tree'] as const;
       const tex: Record<string, number> = {};
+      const textures = [];
       for (const name of texNames) {
         const ext = name === 'worldmap' || name === 'grasslight' ? 'jpg' : 'png';
-        engine.textures.push(makeTexture(await loadImage(`/textures/${name}.${ext}`)));
-        tex[name] = engine.textures.length - 1;
+        textures.push(makeTexture(await loadImage(`/textures/${name}.${ext}`)));
+        tex[name] = textures.length - 1;
       }
-      const world = await buildWorld(engine, {
+      const world = await buildWorld(textures, {
         worldmap: tex.worldmap,
         grasslight: tex.grasslight,
         wall1: tex.wall1,
@@ -52,8 +47,12 @@ function App() {
         roof: tex.roof,
         tree: tex.tree,
       });
-      // test seam: numeric validation of the running engine
-      (window as unknown as { __engine3d: unknown }).__engine3d = { engine, world };
+
+      const renderer = await WgpuRenderer.create(view, VIEW_W, VIEW_H, textures, world.meshes);
+      const proj = projectionMatrix((70 * Math.PI) / 180, VIEW_W / VIEW_H);
+      const viewProj = new Float32Array(16);
+      // test seam
+      (window as unknown as { __wgpu: unknown }).__wgpu = { renderer, world, cam, viewProj };
 
       const keys = new Set<string>();
       const onKeyDown = (e: KeyboardEvent): void => {
@@ -105,8 +104,9 @@ function App() {
         if (keys.has('ArrowUp')) cam.pitch = Math.min(1.5, cam.pitch + TURN_SPEED * 0.5 * dt);
         if (keys.has('ArrowDown')) cam.pitch = Math.max(-1.5, cam.pitch - TURN_SPEED * 0.5 * dt);
 
-        engine.render(world.meshes);
-        engine.present(ctx);
+        const view = viewMatrix(cam.yaw, cam.pitch, cam);
+        viewProj.set(mat4Multiply(proj, view));
+        renderer.render(viewProj);
         drawMinimap(miniCtx, world, cam);
         raf = requestAnimationFrame(loop);
       };
@@ -119,7 +119,7 @@ function App() {
         document.removeEventListener('keyup', onKeyUp);
       };
     })().catch((err) => {
-      console.error('failed to start engine', err);
+      console.error('failed to start wgpu engine', err);
     });
 
     return () => {
@@ -132,7 +132,7 @@ function App() {
     <div className="App">
       <canvas ref={viewRef} />
       <canvas ref={miniRef} width={400} height={400} />
-      <p className="hint">WASD move · arrows turn / look · drag nothing, just keys</p>
+      <p className="hint">WASD move · arrows turn / look (WebGPU renderer)</p>
     </div>
   );
 }
@@ -154,10 +154,8 @@ function drawMinimap(ctx: CanvasRenderingContext2D, world: { footprints: { x: nu
   }
   ctx.fillStyle = '#3a8a4a';
   for (const m of world.markers) {
-    if (m.label === 'tree') ctx.fillRect(sx(m.x) - 2, sz(m.z) - 2, 5, 5);
-    else ctx.fillRect(sx(m.x) - 2, sz(m.z) - 2, 5, 5);
+    ctx.fillRect(sx(m.x) - 2, sz(m.z) - 2, 5, 5);
   }
-  // camera: position + view cone (yaw)
   const camx = sx(cam.x);
   const camz = sz(cam.z);
   ctx.fillStyle = '#e8e020';

@@ -1,7 +1,7 @@
 // World assembly: ground plane, buildings, and downloaded models placed in
 // the scene. All meshes are polygons rendered by the vector engine.
 
-import { Engine, Mesh, addTri, loadObj, shadeMesh, transformMesh, TriVertex } from './engine3d';
+import { Mesh, Texture, addTri, loadObj, shadeMesh, transformMesh, TriVertex } from './engine3d';
 
 export interface WorldTextures {
   worldmap: number;
@@ -143,7 +143,7 @@ function terrain(mesh: Mesh, tex: number, cx: number, cz: number, size: number, 
   }
 }
 
-export async function buildWorld(engine: Engine, tex: WorldTextures): Promise<World> {
+export async function buildWorld(textures: Texture[], tex: WorldTextures): Promise<World> {
   const meshes: Mesh[] = [];
   const footprints: Footprint[] = [];
   const markers: Marker[] = [];
@@ -178,10 +178,10 @@ export async function buildWorld(engine: Engine, tex: WorldTextures): Promise<Wo
   }
 
   // downloaded models
-  const tree = await loadObj('/models/tree.obj', engine.textures, tex.tree);
-  const spider = await loadObj('/models/spider.obj', engine.textures);
-  const wuson = await loadObj('/models/WusonOBJ.obj', engine.textures);
-  const backpack = await loadObj('/models/backpack.obj', engine.textures);
+  const tree = await loadObj('/models/tree.obj', textures, tex.tree);
+  const spider = await loadObj('/models/spider.obj', textures);
+  const wuson = await loadObj('/models/WusonOBJ.obj', textures);
+  const backpack = await loadObj('/models/backpack.obj', textures);
   const trees: [number, number, number][] = [
     // x, z, rotation
     [-10, 10, 0.5],

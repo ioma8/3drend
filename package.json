@@ -47,6 +47,7 @@
     ]
   },
   "devDependencies": {
+    "@webgpu/types": "^0.1.72",
     "eslint-config-prettier": "^9.0.0"
   }
 }
