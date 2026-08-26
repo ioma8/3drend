@@ -1,46 +1,48 @@
-# Getting Started with Create React App
+# 3drend
 
-This project was bootstrapped with [Create React App](https://github.com/facebook/create-react-app).
+A small software 3D engine that renders a textured world in the browser using **vector polygon rendering** — no raycasting, no raytracing.
 
-## Available Scripts
+## How it renders
 
-In the project directory, you can run:
+The same method the project has used from the start, extended to full 3D:
 
-### `npm start`
+1. Every object is a mesh of textured triangles (polygons).
+2. Triangle vertices are transformed into camera space and perspective-projected.
+3. Faces are backface-culled and clipped against the near plane.
+4. Polygons are depth-ordered (painter's algorithm) and rasterized scanline-by-scanline into a per-pixel z-buffer with perspective-correct textures.
 
-Runs the app in the development mode.\
-Open [http://localhost:3000](http://localhost:3000) to view it in the browser.
+No rays are cast, no lights are traced — geometry is projected and filled, exactly like the original wall renderer, just for arbitrary 3D polygons.
 
-The page will reload if you make edits.\
-You will also see any lint errors in the console.
+## Controls
 
-### `npm test`
+| Key | Action |
+| --- | --- |
+| `W` / `S` | move forward / back |
+| `A` / `D` | strafe |
+| `←` / `→` | turn |
+| `↑` / `↓` | look up / down |
 
-Launches the test runner in the interactive watch mode.\
-See the section about [running tests](https://facebook.github.io/create-react-app/docs/running-tests) for more information.
+## Run
 
-### `npm run build`
+```sh
+npm install
+npm start        # http://localhost:3000
+```
 
-Builds the app for production to the `build` folder.\
-It correctly bundles React in production mode and optimizes the build for the best performance.
+Other scripts: `npm run build` (production build), `npm run lint`, `npm test`.
 
-The build is minified and the filenames include the hashes.\
-Your app is ready to be deployed!
+## The world
 
-See the section about [deployment](https://facebook.github.io/create-react-app/docs/deployment) for more information.
+A 200×200 map with a downloaded world-map texture as the ground, rolling grass hills, five buildings (pyramid and flat roofs), and downloaded OBJ models placed around town: a low-poly tree, a spider, a character statue, and a 68k-face backpack on a pedestal in the square.
 
-### `npm run eject`
+## Structure
 
-**Note: this is a one-way operation. Once you `eject`, you can’t go back!**
+- `src/engine3d.ts` — the engine: camera transform, projection, near-plane clipping, painter sort, z-buffered scanline rasterizer, OBJ/MTL loader.
+- `src/world.ts` — world assembly: ground, hills, buildings, model placement.
+- `src/App.tsx` — canvas, input, render loop, minimap.
+- `public/models/` — downloaded OBJ models and their textures.
+- `public/textures/` — ground, wall, roof, and tree textures.
 
-If you aren’t satisfied with the build tool and configuration choices, you can `eject` at any time. This command will remove the single build dependency from your project.
+## Assets
 
-Instead, it will copy all the configuration files and the transitive dependencies (webpack, Babel, ESLint, etc) right into your project so you have full control over them. All of the commands except `eject` will still work, but they will point to the copied scripts so you can tweak them. At this point you’re on your own.
-
-You don’t have to ever use `eject`. The curated feature set is suitable for small and middle deployments, and you shouldn’t feel obligated to use this feature. However we understand that this tool wouldn’t be useful if you couldn’t customize it when you are ready for it.
-
-## Learn More
-
-You can learn more in the [Create React App documentation](https://facebook.github.io/create-react-app/docs/getting-started).
-
-To learn React, check out the [React documentation](https://reactjs.org/).
+Models: `tree.obj` (three.js repo), `spider.obj` + textures (assimp test suite), `WusonOBJ.obj` (assimp test suite), `backpack.obj` + `diffuse.jpg` (LearnOpenGL). World map: NASA-style `land_ocean_ice_cloud_2048.jpg` (three.js examples); `grasslight-big.jpg` (three.js examples).
