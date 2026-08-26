@@ -315,6 +315,7 @@ impl Renderer {
         let mut enc = self.device.create_command_encoder(&Default::default());
         self.draw(&mut enc, &view);
         self.queue.submit([enc.finish()]);
+        self.queue.present(frame);
     }
 
     /// Render the current camera into the surface and copy the presented
@@ -337,6 +338,7 @@ impl Renderer {
             wgpu::Extent3d { width: self.w, height: self.h, depth_or_array_layers: 1 },
         );
         self.queue.submit([enc.finish()]);
+        self.queue.present(frame);
         self.map_readbuf().await
     }
 
