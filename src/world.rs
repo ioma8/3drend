@@ -14,11 +14,25 @@ pub struct ModelAssets {
 }
 
 pub fn vert(x: f32, y: f32, z: f32, u: f32, v: f32) -> Vertex {
-    Vertex { x, y, z, u, v }
+    Vertex { x, y, z, nx: 0.0, ny: 0.0, nz: 0.0, u, v }
 }
 
 // Counter-clockwise quad when viewed from outside, split into two tris.
+// The face normal (from the winding) is stamped onto all four corners, so
+// `box_mesh` gets per-pixel-lit sides for free.
 pub fn quad(mesh: &mut Mesh, tex: u32, a: Vertex, b: Vertex, c: Vertex, d: Vertex) {
+    let (abx, aby, abz) = (b.x - a.x, b.y - a.y, b.z - a.z);
+    let (acx, acy, acz) = (c.x - a.x, c.y - a.y, c.z - a.z);
+    let (nx, ny, nz) = (aby * acz - abz * acy, abz * acx - abx * acz, abx * acy - aby * acx);
+    let nl = (nx * nx + ny * ny + nz * nz).sqrt();
+    let (nx, ny, nz) = if nl == 0.0 { (0.0, 0.0, 0.0) } else { (nx / nl, ny / nl, nz / nl) };
+    let face = |mut v: Vertex| {
+        v.nx = nx;
+        v.ny = ny;
+        v.nz = nz;
+        v
+    };
+    let (a, b, c, d) = (face(a), face(b), face(c), face(d));
     mesh.tris.push(Tri { a, b, c, tex: tex as i32, color: 0, shade: 1.0 });
     mesh.tris.push(Tri { a, b: c, c: d, tex: tex as i32, color: 0, shade: 1.0 });
 }
@@ -42,25 +56,9 @@ pub fn box_mesh(mesh: &mut Mesh, cx: f32, cz: f32, w: f32, h: f32, d: f32, side_
     quad(mesh, side_tex, vert(x0, 0.0, z0, 0.0, 0.0), vert(x1, 0.0, z0, 1.0, 0.0), vert(x1, 0.0, z1, 1.0, 1.0), vert(x0, 0.0, z1, 0.0, 1.0));
 }
 
-/// Flat shading from a fixed light direction, per face.
-pub fn shade_mesh(mesh: &mut Mesh, lx: f32, ly: f32, lz: f32) {
-    let len = (lx * lx + ly * ly + lz * lz).sqrt();
-    let (lx, ly, lz) = (lx / len, ly / len, lz / len);
-    for t in &mut mesh.tris {
-        let (abx, aby, abz) = (t.b.x - t.a.x, t.b.y - t.a.y, t.b.z - t.a.z);
-        let (acx, acy, acz) = (t.c.x - t.a.x, t.c.y - t.a.y, t.c.z - t.a.z);
-        let (nx, ny, nz) = (aby * acz - abz * acy, abz * acx - abx * acz, abx * acy - aby * acx);
-        let nl = (nx * nx + ny * ny + nz * nz).sqrt();
-        if nl == 0.0 {
-            t.shade = 1.0;
-            continue;
-        }
-        let d = (nx * lx + ny * ly + nz * lz) / nl;
-        t.shade = (0.45 + 0.55 * d).clamp(0.35, 1.0);
-    }
-}
-
 /// Apply scale, rotation around Y, and translation (world placement).
+/// Normals get the same Y rotation and are renormalized (scale is uniform
+/// positive, so direction only changes under rotation).
 pub fn transform_mesh(mesh: &mut Mesh, sx: f32, sy: f32, sz: f32, rot_y: f32, tx: f32, ty: f32, tz: f32) {
     let (c, s) = (rot_y.cos(), rot_y.sin());
     for t in &mut mesh.tris {
@@ -69,6 +67,13 @@ pub fn transform_mesh(mesh: &mut Mesh, sx: f32, sy: f32, sz: f32, rot_y: f32, tx
             p.x = x * c + z * s + tx;
             p.y = y + ty;
             p.z = -x * s + z * c + tz;
+            let (nx, nz) = (p.nx * c + p.nz * s, -p.nx * s + p.nz * c);
+            let nl = (nx * nx + p.ny * p.ny + nz * nz).sqrt();
+            if nl != 0.0 {
+                p.nx = nx / nl;
+                p.ny = p.ny / nl;
+                p.nz = nz / nl;
+            }
         }
     }
 }

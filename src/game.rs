@@ -5,7 +5,7 @@
 use crate::app::Camera;
 use crate::obj::{load_obj, Mesh, Texture};
 use crate::renderer::Hud;
-use crate::world::{box_mesh, quad, shade_mesh, transform_mesh, vert, ModelAssets};
+use crate::world::{box_mesh, quad, transform_mesh, vert, ModelAssets};
 
 pub const CELL: f32 = 4.0;
 const WALL_H: f32 = 4.0;
@@ -230,12 +230,10 @@ impl Game {
                 }
             }
         }
-        shade_mesh(&mut walls, -0.4, 0.8, 0.35);
         static_meshes.push(walls);
 
         let mut door_base = Mesh::default();
         box_mesh(&mut door_base, CELL / 2.0, CELL / 2.0, CELL, WALL_H, CELL, TEX_DOOR, TEX_DOOR);
-        shade_mesh(&mut door_base, -0.4, 0.8, 0.35);
 
         // Primitive gun view models (one box each, distinct per weapon).
         let mut guns = Vec::new();
@@ -243,7 +241,6 @@ impl Game {
             let (wd, ht, ln) = w.box_dims();
             let mut m = Mesh::default();
             box_mesh(&mut m, 0.0, 0.0, wd, ht, ln, TEX_WALL, TEX_WALL);
-            shade_mesh(&mut m, -0.2, 0.9, 0.3);
             guns.push(m);
         }
 

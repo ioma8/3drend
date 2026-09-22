@@ -11,13 +11,16 @@ use std::collections::HashMap;
 
 pub type SurfaceFactory = Box<dyn Fn(&wgpu::Instance) -> Result<wgpu::Surface<'static>, String>>;
 
-const STRIDE: u64 = 32; // pos3 + uv2 + color3
+const STRIDE: u64 = 44; // pos3 + normal3 + uv2 + color3
 const HUD_STRIDE: u64 = 20; // pos2 + color3
 const SKY: [f32; 3] = [0.015, 0.015, 0.02]; // dark maze clear color
 
 const SHADER: &str = r#"
 struct Uniforms {
   viewProj: mat4x4<f32>,
+  lightDir: vec4<f32>,
+  fogColor: vec4<f32>,
+  fogDist: vec4<f32>,
 };
 @group(0) @binding(0) var<uniform> u: Uniforms;
 @group(0) @binding(1) var tex: texture_2d<f32>;
@@ -25,13 +28,17 @@ struct Uniforms {
 
 struct VSIn {
   @location(0) pos: vec3<f32>,
-  @location(1) uv: vec2<f32>,
-  @location(2) color: vec3<f32>,
+  @location(1) normal: vec3<f32>,
+  @location(2) uv: vec2<f32>,
+  @location(3) color: vec3<f32>,
 };
 struct VSOut {
   @builtin(position) clip: vec4<f32>,
   @location(0) uv: vec2<f32>,
   @location(1) color: vec3<f32>,
+  @location(2) normal: vec3<f32>,
+  // View-space depth in world units: w = -z_view for this projection.
+  @location(3) depth: f32,
 };
 
 @vertex fn vs(in: VSIn) -> VSOut {
@@ -39,11 +46,21 @@ struct VSOut {
   out.clip = u.viewProj * vec4<f32>(in.pos, 1.0);
   out.uv = in.uv;
   out.color = in.color;
+  out.normal = in.normal;
+  out.depth = out.clip.w;
   return out;
 }
 
 @fragment fn fs(in: VSOut) -> @location(0) vec4<f32> {
-  return vec4<f32>(textureSample(tex, smp, in.uv).rgb * in.color, 1.0);
+  // Simple per-pixel directional light, same formula as the old baked
+  // per-face shading: ambient 0.45 + 0.55 * max(dot(n, l), 0), 0.35..1.
+  let n = normalize(in.normal);
+  let l = normalize(u.lightDir.xyz);
+  let lit = clamp(0.45 + 0.55 * dot(n, l), 0.35, 1.0);
+  // Exponential-free distance fog toward the sky color.
+  let fog = smoothstep(u.fogDist.x, u.fogDist.y, in.depth);
+  let col = textureSample(tex, smp, in.uv).rgb * in.color * lit;
+  return vec4<f32>(mix(col, u.fogColor.rgb, fog), 1.0);
 }
 "#;
 
@@ -72,9 +89,26 @@ struct HudOut {
 #[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
 struct Vtx {
     pos: [f32; 3],
+    normal: [f32; 3],
     uv: [f32; 2],
     color: [f32; 3],
 }
+
+#[repr(C)]
+#[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
+struct Uniforms {
+    view_proj: [f32; 16],
+    light_dir: [f32; 4],
+    fog_color: [f32; 4],
+    fog_dist: [f32; 4],
+}
+
+// Scene light, direction the light comes FROM (the old shade_mesh constant).
+const LIGHT_DIR: [f32; 4] = [0.416, 0.833, 0.364, 0.0];
+// Distance fog toward the sky clear color, in view-space depth units.
+const FOG_COLOR: [f32; 4] = [0.015, 0.015, 0.02, 1.0];
+const FOG_NEAR: f32 = 50.0;
+const FOG_FAR: f32 = 250.0;
 
 #[repr(C)]
 #[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
@@ -184,7 +218,7 @@ impl Renderer {
             entries: &[
                 wgpu::BindGroupLayoutEntry {
                     binding: 0,
-                    visibility: wgpu::ShaderStages::VERTEX,
+                    visibility: wgpu::ShaderStages::VERTEX | wgpu::ShaderStages::FRAGMENT,
                     ty: wgpu::BindingType::Buffer {
                         ty: wgpu::BufferBindingType::Uniform,
                         has_dynamic_offset: false,
@@ -227,8 +261,9 @@ impl Renderer {
                     step_mode: wgpu::VertexStepMode::Vertex,
                     attributes: &[
                         wgpu::VertexAttribute { format: wgpu::VertexFormat::Float32x3, offset: 0, shader_location: 0 },
-                        wgpu::VertexAttribute { format: wgpu::VertexFormat::Float32x2, offset: 12, shader_location: 1 },
-                        wgpu::VertexAttribute { format: wgpu::VertexFormat::Float32x3, offset: 20, shader_location: 2 },
+                        wgpu::VertexAttribute { format: wgpu::VertexFormat::Float32x3, offset: 12, shader_location: 1 },
+                        wgpu::VertexAttribute { format: wgpu::VertexFormat::Float32x2, offset: 24, shader_location: 2 },
+                        wgpu::VertexAttribute { format: wgpu::VertexFormat::Float32x3, offset: 32, shader_location: 3 },
                     ],
                 })],
             },
@@ -305,7 +340,7 @@ impl Renderer {
         });
         let uniform = device.create_buffer(&wgpu::BufferDescriptor {
             label: None,
-            size: 64,
+            size: std::mem::size_of::<Uniforms>() as u64,
             usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
             mapped_at_creation: false,
         });
@@ -354,7 +389,7 @@ impl Renderer {
     /// Draw one frame: scene, then HUD overlay, to the surface.
     pub fn render(&mut self, view_proj: &Mat4, meshes: &[Mesh], hud: &Hud) {
         self.view_proj = *view_proj;
-        self.queue.write_buffer(&self.uniform, 0, bytemuck::cast_slice(&[view_proj.0]));
+        self.write_uniforms();
         self.rebuild_groups(meshes);
         let Some((frame, reconfigure)) = self.acquire_frame() else { return };
         let view = frame.texture.create_view(&Default::default());
@@ -371,7 +406,7 @@ impl Renderer {
     /// Render the current camera into the offscreen target and read it back
     /// as tightly packed RGBA bytes (verification; HUD excluded).
     pub async fn read_frame(&mut self, meshes: &[Mesh]) -> Result<Vec<u8>, String> {
-        self.queue.write_buffer(&self.uniform, 0, bytemuck::cast_slice(&[self.view_proj.0]));
+        self.write_uniforms();
         self.rebuild_groups(meshes);
         let off_view = self.off.create_view(&Default::default());
         let mut enc = self.device.create_command_encoder(&Default::default());
@@ -388,11 +423,22 @@ impl Renderer {
         self.map_readbuf().await
     }
 
+    fn write_uniforms(&self) {
+        let uniforms = Uniforms {
+            view_proj: self.view_proj.0,
+            light_dir: LIGHT_DIR,
+            fog_color: FOG_COLOR,
+            fog_dist: [FOG_NEAR, FOG_FAR, 0.0, 0.0],
+        };
+        self.queue.write_buffer(&self.uniform, 0, bytemuck::cast_slice(&[uniforms]));
+    }
+
     fn rebuild_groups(&mut self, meshes: &[Mesh]) {
+        let visible: Vec<&Mesh> = meshes.iter().filter(|m| mesh_visible(&self.view_proj, m)).collect();
         self.groups = build_groups(
             &self.device,
             &self.queue,
-            meshes,
+            &visible,
             &self.gpu_textures,
             &self.layout,
             &self.sampler,
@@ -599,12 +645,13 @@ fn make_white(device: &wgpu::Device, queue: &wgpu::Queue) -> wgpu::Texture {
     gpu
 }
 
-/// Pack meshes into per-texture vertex buffers + bind groups. Flat-color
-/// triangles share a 1x1 white texture (index `gpu_textures.len() - 1`).
+/// Pack the given meshes into per-texture vertex buffers + bind groups.
+/// Flat-color triangles share a 1x1 white texture (index
+/// `gpu_textures.len() - 1`). Callers pass only frustum-visible meshes.
 fn build_groups(
     device: &wgpu::Device,
     queue: &wgpu::Queue,
-    meshes: &[Mesh],
+    meshes: &[&Mesh],
     gpu_textures: &[wgpu::Texture],
     layout: &wgpu::BindGroupLayout,
     sampler: &wgpu::Sampler,
@@ -632,7 +679,7 @@ fn build_groups(
                 } else {
                     (tri.shade, tri.shade, tri.shade)
                 };
-                verts.push(Vtx { pos: [v.x, v.y, v.z], uv: [v.u, v.v], color: [cr, cg, cb] });
+                verts.push(Vtx { pos: [v.x, v.y, v.z], normal: [v.nx, v.ny, v.nz], uv: [v.u, v.v], color: [cr, cg, cb] });
             }
         }
         let buffer = device.create_buffer(&wgpu::BufferDescriptor {
@@ -655,6 +702,53 @@ fn build_groups(
         groups.push(Group { buffer, count: (tris.len() * 3) as u32, bind_group });
     }
     groups
+}
+
+/// Conservative per-mesh frustum cull. Extracts the six clip-space half-space
+/// planes from `view_proj` and rejects a mesh only when its AABB lies fully
+/// outside one of them (positive-vertex test). A culled mesh is guaranteed
+/// invisible, so pixels never change; a mesh whose AABB *contains* the
+/// frustum (e.g. the map-wide floor/ceiling under the camera) is always
+/// kept, which a corner-only test would wrongly drop.
+fn mesh_visible(view_proj: &Mat4, mesh: &Mesh) -> bool {
+    if mesh.tris.is_empty() {
+        return false;
+    }
+    let (mut minx, mut miny, mut minz) = (f32::INFINITY, f32::INFINITY, f32::INFINITY);
+    let (mut maxx, mut maxy, mut maxz) = (f32::NEG_INFINITY, f32::NEG_INFINITY, f32::NEG_INFINITY);
+    for t in &mesh.tris {
+        for v in [&t.a, &t.b, &t.c] {
+            minx = minx.min(v.x);
+            miny = miny.min(v.y);
+            minz = minz.min(v.z);
+            maxx = maxx.max(v.x);
+            maxy = maxy.max(v.y);
+            maxz = maxz.max(v.z);
+        }
+    }
+    let m = view_proj.0;
+    // Clip planes (a,b,c,d) with s = a*x + b*y + c*z + d >= 0 inside, for the
+    // column-major layout m[col*4+row]: left, right, bottom, top, near, far.
+    let planes: [[f32; 4]; 6] = [
+        [m[0] + m[3], m[4] + m[7], m[8] + m[11], m[12] + m[15]],
+        [m[3] - m[0], m[7] - m[4], m[11] - m[8], m[15] - m[12]],
+        [m[1] + m[3], m[5] + m[7], m[9] + m[11], m[13] + m[15]],
+        [m[3] - m[1], m[7] - m[5], m[11] - m[9], m[15] - m[13]],
+        [m[2], m[6], m[10], m[14]],
+        [m[3] - m[2], m[7] - m[6], m[11] - m[10], m[15] - m[14]],
+    ];
+    for p in planes {
+        // Corner of the AABB furthest along the plane normal (p-vertex).
+        let (x, y, z) = (
+            if p[0] >= 0.0 { maxx } else { minx },
+            if p[1] >= 0.0 { maxy } else { miny },
+            if p[2] >= 0.0 { maxz } else { minz },
+        );
+        if p[0] * x + p[1] * y + p[2] * z + p[3] < -1e-3 {
+            return false;
+        }
+    }
+    true
 }
 
 /// Build the screen-space overlay: crosshair, health/ammo bars, weapon pips.
@@ -693,7 +787,64 @@ fn push_quad(v: &mut Vec<HudVtx>, x0: f32, y0: f32, x1: f32, y1: f32, color: [f3
 
 #[cfg(test)]
 mod tests {
-    use super::{padded_row_bytes, unpack_rows};
+    use super::{mesh_visible, padded_row_bytes, unpack_rows};
+    use crate::math::Mat4;
+    use crate::obj::Mesh;
+    use crate::world::{box_mesh, quad, vert};
+
+    /// Camera like the reference test: yaw 0 (facing +z), pitch -0.4,
+    /// position (0, 30, -70); 70 deg fov, far 1000.
+    fn frustum() -> Mat4 {
+        let proj = Mat4::perspective(70.0_f32.to_radians(), 640.0 / 360.0, 0.05, 1000.0);
+        let view = Mat4::view(0.0, -0.4, [0.0, 30.0, -70.0]);
+        proj.multiply(&view)
+    }
+
+    #[test]
+    fn culling_keeps_mesh_in_front() {
+        let mut m = Mesh::default();
+        box_mesh(&mut m, 0.0, 30.0, 4.0, 4.0, 4.0, 0, 0);
+        assert!(mesh_visible(&frustum(), &m));
+    }
+
+    #[test]
+    fn culling_drops_mesh_behind_camera() {
+        let mut m = Mesh::default();
+        box_mesh(&mut m, 0.0, -200.0, 4.0, 4.0, 4.0, 0, 0);
+        assert!(!mesh_visible(&frustum(), &m));
+    }
+
+    #[test]
+    fn culling_drops_mesh_beyond_far_plane() {
+        let mut m = Mesh::default();
+        box_mesh(&mut m, 0.0, 2000.0, 4.0, 4.0, 4.0, 0, 0);
+        assert!(!mesh_visible(&frustum(), &m));
+    }
+
+    #[test]
+    fn culling_drops_mesh_off_to_the_side() {
+        let mut m = Mesh::default();
+        box_mesh(&mut m, -5000.0, 30.0, 4.0, 4.0, 4.0, 0, 0);
+        assert!(!mesh_visible(&frustum(), &m));
+    }
+
+    #[test]
+    fn culling_keeps_map_spanning_mesh_around_camera() {
+        // Floor/ceiling span the whole map; the camera sits inside their
+        // AABB. A corner-only test would drop them; the plane test must not.
+        let mut m = Mesh::default();
+        quad(&mut m, 0,
+            vert(-1000.0, 0.0, -1000.0, 0.0, 0.0),
+            vert(1000.0, 0.0, -1000.0, 1.0, 0.0),
+            vert(1000.0, 0.0, 1000.0, 1.0, 1.0),
+            vert(-1000.0, 0.0, 1000.0, 0.0, 1.0));
+        assert!(mesh_visible(&frustum(), &m));
+    }
+
+    #[test]
+    fn culling_drops_empty_mesh() {
+        assert!(!mesh_visible(&frustum(), &Mesh::default()));
+    }
 
     #[test]
     fn readback_rows_are_256_byte_aligned() {
