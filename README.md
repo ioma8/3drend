@@ -56,6 +56,7 @@ cargo run --release --features native -- --frames 60 --dump frame.rgba   # rende
 | `src/lib.rs` | wasm-bindgen adapter and shared `App` |
 | `src/main.rs` | winit window, native asset I/O, mouse/keyboard input |
 | `public/js/main.js` | Browser-only I/O/input/rAF adapter |
+| `docs/rendering.md` | How the rendering algorithm works, step by step |
 
 ## Verification
 
