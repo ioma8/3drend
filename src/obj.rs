@@ -17,6 +17,10 @@ pub struct Vertex {
     pub x: f32,
     pub y: f32,
     pub z: f32,
+    /// Unit face normal (world space after `transform_mesh`).
+    pub nx: f32,
+    pub ny: f32,
+    pub nz: f32,
     /// Texture u in [0, 1].
     pub u: f32,
     /// Texture v in [0, 1], 0 = texture top row.
@@ -136,13 +140,27 @@ pub fn load_obj(
                 }
                 _ => (0.0, 0.0),
             };
-            Vertex { x: vs[k], y: vs[k + 1], z: vs[k + 2], u, v: vv }
+            Vertex { x: vs[k], y: vs[k + 1], z: vs[k + 2], nx: 0.0, ny: 0.0, nz: 0.0, u, v: vv }
         };
         for i in 1..face.len() - 1 {
+            let mut a = mk(0);
+            let mut b = mk(i);
+            let mut c = mk(i + 1);
+            // Flat-shaded face normal from the triangle winding, per vertex.
+            let (abx, aby, abz) = (b.x - a.x, b.y - a.y, b.z - a.z);
+            let (acx, acy, acz) = (c.x - a.x, c.y - a.y, c.z - a.z);
+            let (nx, ny, nz) = (aby * acz - abz * acy, abz * acx - abx * acz, abx * acy - aby * acx);
+            let nl = (nx * nx + ny * ny + nz * nz).sqrt();
+            let (nx, ny, nz) = if nl == 0.0 { (0.0, 0.0, 0.0) } else { (nx / nl, ny / nl, nz / nl) };
+            for p in [&mut a, &mut b, &mut c] {
+                p.nx = nx;
+                p.ny = ny;
+                p.nz = nz;
+            }
             mesh.tris.push(Tri {
-                a: mk(0),
-                b: mk(i),
-                c: mk(i + 1),
+                a,
+                b,
+                c,
                 tex: mat.tex,
                 color: mat.color,
                 shade: 1.0,
