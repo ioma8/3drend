@@ -105,10 +105,13 @@ struct Uniforms {
 
 // Scene light, direction the light comes FROM (the old shade_mesh constant).
 const LIGHT_DIR: [f32; 4] = [0.416, 0.833, 0.364, 0.0];
-// Distance fog toward the sky clear color, in view-space depth units.
-const FOG_COLOR: [f32; 4] = [0.015, 0.015, 0.02, 1.0];
-const FOG_NEAR: f32 = 50.0;
-const FOG_FAR: f32 = 250.0;
+// Distance fog, in view-space depth units. The maze is cramped: bays are
+// CELL = 4, eye height 1.6, and any single view's visible depth is only a
+// handful of bays (~3-20 units). Fog must ramp inside that band or it never
+// shows. Color is a lighter slate that reads as haze, not as wall shading.
+const FOG_COLOR: [f32; 4] = [0.18, 0.18, 0.20, 1.0];
+const FOG_NEAR: f32 = 3.0;
+const FOG_FAR: f32 = 18.0;
 
 #[repr(C)]
 #[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]

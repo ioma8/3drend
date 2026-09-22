@@ -37,9 +37,9 @@ tracing.
    0.55 × max(normal · light, 0)`, clamped to 0.35..1. Flat-colored faces
    use a 1×1 white texture, so a single pipeline handles textured and flat
    triangles alike.
-8. **Fog (GPU).** Distant pixels are blended toward the dark sky color by
-   depth (`smoothstep(fog near, fog far)`), which hides the edge of the
-   maze and gives a sense of scale.
+8. **Fog (GPU).** Distant pixels are blended toward a slate haze color by
+   depth (`smoothstep(fog near, fog far)`), which hides the edge of the maze
+   and gives a sense of scale.
 9. **HUD (GPU).** A second, simpler pass draws flat 2D colored rectangles on
    top — crosshair, health/ammo bars. No depth, no texture; positions are
    given directly in screen coordinates.
